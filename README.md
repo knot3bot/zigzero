@@ -41,6 +41,7 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 - **MapReduce** (`mapreduce`) - Concurrent map/reduce pipelines aligned with go-zero's mr
 - **Threading** (`threading`) - RoutineGroup, TaskRunner, safe goroutine spawning
 - **SQL Client** (`sqlx`) - Unified SQL client abstraction with query builder
+- **Code Generation** (`zigzeroctl`) - CLI tool for scaffolding, API codegen, and model generation from SQL
 
 ## Quick Start
 
@@ -150,6 +151,36 @@ zig build
 zig build test
 ```
 
+## Code Generation (zigzeroctl)
+
+`zigzeroctl` is the goctl-equivalent code generation tool for zigzero.
+
+```bash
+# Build the CLI
+zig build
+
+# Scaffold a new service project
+./zig-out/bin/zigzeroctl new my-service
+
+# Generate API routes and handlers from a JSON spec
+./zig-out/bin/zigzeroctl api api-spec.json -o gen/api
+
+# Generate ORM models from SQL DDL
+./zig-out/bin/zigzeroctl model schema.sql -o gen/models
+```
+
+### API Spec Format
+
+```json
+{
+  "name": "user-api",
+  "routes": [
+    { "method": "GET", "path": "/users", "handler": "listUsers" },
+    { "method": "POST", "path": "/users", "handler": "createUser" }
+  ]
+}
+```
+
 ## Architecture
 
 ```
@@ -205,6 +236,7 @@ zig build test
 | `mapreduce` | `core/mapreduce` | Map / Reduce / MapReduce pipelines | ✅ Complete |
 | `load` | `core/load` | Adaptive load shedding | ✅ Complete |
 | `sqlx` | `infra/sqlx` | Unified SQL client abstraction | ✅ Complete |
+| `zigzeroctl` | `tools/zigzeroctl` | Code generation CLI (goctl equivalent) | ✅ Complete |
 
 ## Requirements
 

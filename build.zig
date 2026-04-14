@@ -14,6 +14,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // zigzeroctl code generation tool
+    const ctl_module = b.createModule(.{
+        .root_source_file = b.path("tools/zigzeroctl/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const ctl = b.addExecutable(.{
+        .name = "zigzeroctl",
+        .root_module = ctl_module,
+    });
+    b.installArtifact(ctl);
+
     const test_step = b.step("test", "Run unit tests");
 
     const test_module = b.createModule(.{
