@@ -20,7 +20,7 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 - **Logging** (`log`) - Structured logging with levels and file rotation
 - **Circuit Breaker** (`breaker`) - Hystrix-style circuit breaker
 - **Rate Limiter** (`limiter`) - Token bucket and sliding window
-- **Load Shedder** (`load`) - Adaptive load shedding aligned with go-zero core/load
+- **Load Shedder** (`load`) - Adaptive load shedding with middleware integration
 - **Load Balancer** (`loadbalancer`) - Round robin, random, weighted, least connection, IP hash, consistent hashing
 - **Redis Client** (`redis`) - RESP protocol implementation with cluster support
 - **Connection Pool** (`pool`) - Generic connection pooling

@@ -8,6 +8,7 @@ const errors = @import("../core/errors.zig");
 const limiter = @import("../infra/limiter.zig");
 const trace = @import("../infra/trace.zig");
 const metric = @import("../infra/metric.zig");
+const load = @import("../core/load.zig");
 
 /// JWT claims
 pub const Claims = struct {
@@ -245,6 +246,23 @@ pub fn prometheusHandler(registry: *metric.Registry) api.HandlerFn {
             ctx.responded = true;
         }
     }.handle;
+}
+
+/// Load shedding middleware using adaptive shedder
+pub fn loadShedding(shedder: *load.AdaptiveShedder) api.MiddlewareFn {
+    return struct {
+        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
+            const promise = shedder.allow() catch {
+                try ctx.sendError(503, "service overloaded");
+                return;
+            };
+            next(ctx) catch |err| {
+                promise.fail();
+                return err;
+            };
+            promise.pass();
+        }
+    }.middleware;
 }
 
 test "middleware" {
