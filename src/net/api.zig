@@ -197,7 +197,17 @@ pub const Context = struct {
     pub fn sendError(self: *Context, status: u16, message: []const u8) !void {
         self.status_code = status;
         try self.setHeader("Content-Type", "application/json");
-        const err_json = try std.fmt.allocPrint(self.allocator, "{{\"error\":\"{s}\"}}", .{message});
+        const err_json = try std.fmt.allocPrint(self.allocator, "{{\"code\":{d},\"message\":\"{s}\"}}", .{ status, message });
+        defer self.allocator.free(err_json);
+        try self.response_body.appendSlice(self.allocator, err_json);
+        self.responded = true;
+    }
+
+    /// Send structured error response
+    pub fn sendErrorResponse(self: *Context, status: u16, resp: errors.ErrorResponse) !void {
+        self.status_code = status;
+        try self.setHeader("Content-Type", "application/json");
+        const err_json = try errors.toJson(self.allocator, resp);
         defer self.allocator.free(err_json);
         try self.response_body.appendSlice(self.allocator, err_json);
         self.responded = true;
