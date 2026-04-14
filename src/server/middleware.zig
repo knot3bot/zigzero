@@ -233,6 +233,20 @@ pub fn observability(registry: *metric.Registry) api.MiddlewareFn {
     }.middleware;
 }
 
+/// Prometheus metrics handler
+pub fn prometheusHandler(registry: *metric.Registry) api.HandlerFn {
+    return struct {
+        fn handle(ctx: *api.Context) !void {
+            var buf = std.ArrayList(u8){};
+            defer buf.deinit(ctx.allocator);
+            try registry.exportPrometheus(buf.writer(ctx.allocator));
+            try ctx.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+            try ctx.response_body.appendSlice(ctx.allocator, buf.items);
+            ctx.responded = true;
+        }
+    }.handle;
+}
+
 test "middleware" {
     try std.testing.expect(true);
 }

@@ -27,7 +27,7 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 - **Health Checks** (`health`) - Health probe registry
 - **Service Discovery** (`discovery`) - Static service discovery
 - **Distributed Tracing** (`trace`) - OpenTelemetry-compatible tracing with W3C TraceContext propagation
-- **Metrics** (`metric`) - Prometheus-compatible metrics
+- **Metrics** (`metric`) - Prometheus-compatible metrics with `/metrics` handler
 - **Retry** (`retry`) - Exponential backoff with jitter
 - **Message Queue** (`mq`) - In-memory pub/sub messaging
 - **Cron Scheduler** (`cron`) - Scheduled task execution
