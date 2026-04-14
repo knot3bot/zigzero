@@ -186,6 +186,88 @@ pub fn parseSpanId(hex: []const u8) !SpanId {
     return id;
 }
 
+/// Trace flags
+pub const TraceFlags = struct {
+    pub const sampled: u8 = 0x01;
+};
+
+/// TraceContext holds propagated tracing state (W3C TraceContext)
+pub const TraceContext = struct {
+    trace_id: TraceId,
+    span_id: SpanId,
+    flags: u8,
+    trace_state: ?[]const u8 = null,
+
+    /// Format traceparent header value: 00-<trace_id>-<span_id>-<flags>
+    pub fn formatTraceparent(self: *const TraceContext, buf: []u8) ![]const u8 {
+        var i: usize = 0;
+        @memcpy(buf[i..][0..3], "00-");
+        i += 3;
+        for (self.trace_id) |b| {
+            const hex = try std.fmt.bufPrint(buf[i..][0..2], "{x:0>2}", .{b});
+            i += hex.len;
+        }
+        buf[i] = '-';
+        i += 1;
+        for (self.span_id) |b| {
+            const hex = try std.fmt.bufPrint(buf[i..][0..2], "{x:0>2}", .{b});
+            i += hex.len;
+        }
+        buf[i] = '-';
+        i += 1;
+        const flags_hex = try std.fmt.bufPrint(buf[i..][0..2], "{x:0>2}", .{self.flags});
+        i += flags_hex.len;
+        return buf[0..i];
+    }
+
+    /// Parse traceparent header value
+    pub fn parseTraceparent(allocator: std.mem.Allocator, value: []const u8) !?TraceContext {
+        _ = allocator;
+        var parts = std.mem.splitScalar(u8, value, '-');
+        const version = parts.next() orelse return null;
+        const trace_id_hex = parts.next() orelse return null;
+        const span_id_hex = parts.next() orelse return null;
+        const flags_hex = parts.next() orelse return null;
+
+        if (!std.mem.eql(u8, version, "00")) return null;
+        if (trace_id_hex.len != 32) return null;
+        if (span_id_hex.len != 16) return null;
+        if (flags_hex.len != 2) return null;
+
+        const trace_id = try parseTraceId(trace_id_hex);
+        const span_id = try parseSpanId(span_id_hex);
+        const flags = try std.fmt.parseInt(u8, flags_hex, 16);
+
+        return TraceContext{
+            .trace_id = trace_id,
+            .span_id = span_id,
+            .flags = flags,
+        };
+    }
+
+    /// Check if trace is sampled
+    pub fn isSampled(self: *const TraceContext) bool {
+        return (self.flags & TraceFlags.sampled) != 0;
+    }
+};
+
+/// Inject trace context into HTTP headers
+pub fn injectHttpHeaders(ctx: TraceContext, headers: *std.StringHashMap([]const u8)) !void {
+    var buf: [55]u8 = undefined;
+    const traceparent = try ctx.formatTraceparent(&buf);
+    const key = try headers.allocator.dupe(u8, "traceparent");
+    const value = try headers.allocator.dupe(u8, traceparent);
+    try headers.put(key, value);
+}
+
+/// Extract trace context from HTTP headers
+pub fn extractHttpHeaders(allocator: std.mem.Allocator, headers: std.StringHashMap([]const u8)) !?TraceContext {
+    if (headers.get("traceparent")) |value| {
+        return try TraceContext.parseTraceparent(allocator, value);
+    }
+    return null;
+}
+
 test "tracing" {
     const allocator = std.testing.allocator;
 
@@ -206,4 +288,45 @@ test "trace id generation" {
 
     try std.testing.expectEqual(@as(usize, 16), trace_id.len);
     try std.testing.expectEqual(@as(usize, 8), span_id.len);
+}
+
+test "tracecontext format and parse" {
+    const allocator = std.testing.allocator;
+    var ctx = TraceContext{
+        .trace_id = try parseTraceId("0af7651916cd43dd8448eb211c80319c"),
+        .span_id = try parseSpanId("b7ad6b7169203331"),
+        .flags = TraceFlags.sampled,
+    };
+
+    var buf: [55]u8 = undefined;
+    const tp = try ctx.formatTraceparent(&buf);
+    try std.testing.expectEqualStrings("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", tp);
+
+    const parsed = try TraceContext.parseTraceparent(allocator, tp);
+    try std.testing.expect(parsed != null);
+    try std.testing.expect(parsed.?.isSampled());
+}
+
+test "tracecontext extract and inject headers" {
+    const allocator = std.testing.allocator;
+    var headers = std.StringHashMap([]const u8).init(allocator);
+    defer {
+        var iter = headers.iterator();
+        while (iter.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        headers.deinit();
+    }
+
+    const ctx = TraceContext{
+        .trace_id = try parseTraceId("0af7651916cd43dd8448eb211c80319c"),
+        .span_id = try parseSpanId("b7ad6b7169203331"),
+        .flags = TraceFlags.sampled,
+    };
+
+    try injectHttpHeaders(ctx, &headers);
+    const extracted = try extractHttpHeaders(allocator, headers);
+    try std.testing.expect(extracted != null);
+    try std.testing.expect(extracted.?.isSampled());
 }

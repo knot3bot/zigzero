@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const errors = @import("../core/errors.zig");
+const trace = @import("../infra/trace.zig");
 
 pub const Method = enum {
     GET,
@@ -56,12 +57,17 @@ pub const Config = struct {
 pub const Client = struct {
     allocator: std.mem.Allocator,
     config: Config,
+    trace_context: ?trace.TraceContext = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Client {
         return .{
             .allocator = allocator,
             .config = config,
         };
+    }
+
+    pub fn withTraceContext(self: *Client, ctx: ?trace.TraceContext) void {
+        self.trace_context = ctx;
     }
 
     /// Send HTTP GET request
@@ -116,6 +122,13 @@ pub const Client = struct {
         } else {
             try req_builder.writer(self.allocator).print("{s} {s} HTTP/1.1\r\n", .{ method.toString(), path });
             try req_builder.writer(self.allocator).print("Host: {s}\r\n", .{host});
+        }
+
+        // Add trace context if present
+        if (self.trace_context) |ctx| {
+            var tp_buf: [55]u8 = undefined;
+            const tp = try ctx.formatTraceparent(&tp_buf);
+            try req_builder.writer(self.allocator).print("traceparent: {s}\r\n", .{tp});
         }
 
         // Add custom headers

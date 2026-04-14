@@ -6,6 +6,7 @@
 const std = @import("std");
 const errors = @import("../core/errors.zig");
 const log = @import("../infra/log.zig");
+const trace = @import("../infra/trace.zig");
 
 /// HTTP method
 pub const Method = enum {
@@ -81,6 +82,7 @@ pub const Context = struct {
     responded: bool = false,
     logger: log.Logger,
     user_data: ?*anyopaque = null,
+    trace_context: ?trace.TraceContext = null,
 
     // Middleware chain fields (use fully expanded type to avoid dependency loop)
     chain_middlewares: []const *const fn (*Context, *const fn (*Context) anyerror!void) anyerror!void = &.{},
@@ -826,6 +828,13 @@ pub const Server = struct {
 
         ctx.body = request.body;
         ctx.raw_path = request.raw_path;
+
+        // Extract trace context from traceparent header
+        if (request.headers.get("traceparent")) |tp| {
+            if (trace.TraceContext.parseTraceparent(arena_alloc, tp)) |maybe_ctx| {
+                ctx.trace_context = maybe_ctx;
+            } else |_| {}
+        }
 
         // Parse form body if content-type is application/x-www-form-urlencoded
         if (request.body) |body| {
