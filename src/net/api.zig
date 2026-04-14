@@ -7,6 +7,7 @@ const std = @import("std");
 const errors = @import("../core/errors.zig");
 const log = @import("../infra/log.zig");
 const trace = @import("../infra/trace.zig");
+const validate = @import("../data/validate.zig");
 
 /// HTTP method
 pub const Method = enum {
@@ -89,6 +90,7 @@ pub const Context = struct {
     logger: log.Logger,
     user_data: ?*anyopaque = null,
     trace_context: ?trace.TraceContext = null,
+    validation_error_message: ?[]const u8 = null,
 
     // Middleware chain fields
     chain_middlewares: []const Middleware = &.{},
@@ -148,6 +150,10 @@ pub const Context = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.response_headers.deinit();
+
+        if (self.validation_error_message) |msg| {
+            self.allocator.free(msg);
+        }
     }
 
     /// Get query parameter
@@ -216,9 +222,21 @@ pub const Context = struct {
     /// Parse JSON body into type T
     pub fn bindJson(self: *const Context, comptime T: type) !T {
         if (self.body == null) return error.NoBody;
-        var parsed = std.json.parseFromSlice(T, self.allocator, self.body.?, .{}) catch return error.InvalidJson;
+        var parsed = std.json.parseFromSlice(T, self.allocator, self.body.?, .{ .allocate = .alloc_always }) catch return error.InvalidJson;
         defer parsed.deinit();
         return parsed.value;
+    }
+
+    /// Parse JSON body into type T and validate against comptime rules.
+    /// On validation failure, stores the error message in `validation_error_message`
+    /// and returns `error.ValidationError`. Caller should free `validation_error_message`.
+    pub fn bindJsonAndValidate(self: *Context, comptime T: type, comptime rules: anytype) !T {
+        const value = try self.bindJson(T);
+        if (try validate.validateStruct(self.allocator, value, rules)) |msg| {
+            self.validation_error_message = msg;
+            return error.ValidationError;
+        }
+        return value;
     }
 
     /// Send JSON from struct

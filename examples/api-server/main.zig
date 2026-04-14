@@ -101,39 +101,37 @@ pub fn main() !void {
         .middleware = &.{try middleware.jwt(allocator, "my-secret-key")},
     });
 
-    // User endpoint with validation
+    // User endpoint with comptime struct validation
     try server.addRoute(.{
         .method = .POST,
         .path = "/users",
         .handler = struct {
             fn handle(ctx: *api.Context) !void {
-                if (ctx.body == null) {
-                    try ctx.sendError(400, "missing body");
-                    return;
-                }
-
                 const Req = struct {
                     name: []const u8,
                     email: []const u8,
+                    age: u32,
                 };
-                const req = std.json.parseFromSlice(Req, ctx.allocator, ctx.body.?, .{}) catch {
-                    try ctx.sendError(400, "invalid json");
+
+                const req = ctx.bindJsonAndValidate(Req, .{
+                    .name = zigzero.validate.FieldRules{ .required = true, .min_len = 2, .max_len = 50 },
+                    .email = zigzero.validate.FieldRules{ .required = true, .email = true },
+                    .age = zigzero.validate.FieldRules{ .min = 0, .max = 150 },
+                }) catch |err| {
+                    if (err == error.ValidationError) {
+                        const msg = ctx.validation_error_message orelse "validation failed";
+                        try ctx.sendError(400, msg);
+                        return;
+                    }
+                    try ctx.sendError(400, "invalid request");
                     return;
                 };
-                defer req.deinit();
-
-                const name_valid = zigzero.validate.notEmpty(req.value.name);
-                const email_valid = zigzero.validate.email(req.value.email);
-
-                if (!name_valid.valid or !email_valid.valid) {
-                    try ctx.sendError(400, "validation failed");
-                    return;
-                }
 
                 try ctx.jsonStruct(201, .{
                     .id = 1,
-                    .name = req.value.name,
-                    .email = req.value.email,
+                    .name = req.name,
+                    .email = req.email,
+                    .age = req.age,
                 });
             }
         }.handle,
