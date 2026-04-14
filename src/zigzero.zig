@@ -78,6 +78,7 @@ comptime {
     _ = limiter.TokenBucket;
     _ = loadbalancer.LoadBalancer;
     _ = redis.Redis;
+    _ = redis.RedisCluster;
     _ = errors.Error;
     _ = fx.Stream(u8);
     _ = threading.RoutineGroup;
