@@ -3,7 +3,7 @@
 //! Provides HTTPS server capabilities using Zig's crypto libraries.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 /// TLS configuration
 pub const Config = struct {

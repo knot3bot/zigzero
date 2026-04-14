@@ -4,9 +4,9 @@
 //! Aligned with go-zero's zrpc package.
 
 const std = @import("std");
-const errors = @import("errors.zig");
-const breaker = @import("breaker.zig");
-const loadbalancer = @import("loadbalancer.zig");
+const errors = @import("../core/errors.zig");
+const breaker = @import("../infra/breaker.zig");
+const loadbalancer = @import("../infra/loadbalancer.zig");
 
 /// RPC client configuration
 pub const ClientConfig = struct {

@@ -3,8 +3,8 @@
 //! Provides static file serving with MIME type detection.
 
 const std = @import("std");
-const errors = @import("errors.zig");
-const api = @import("api.zig");
+const errors = @import("../core/errors.zig");
+const api = @import("../net/api.zig");
 
 /// Static file server
 pub const Server = struct {

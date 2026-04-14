@@ -3,7 +3,7 @@
 //! Provides WebSocket server capabilities (RFC 6455).
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 const api = @import("api.zig");
 
 /// WebSocket opcode

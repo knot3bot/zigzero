@@ -11,8 +11,12 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 - **HTTP Server** (`api`) - Full HTTP server with routing, middleware, JSON parsing
 - **RPC Framework** (`rpc`) - Binary protocol RPC over TCP with circuit breaker
 - **HTTP Client** (`http`) - HTTP client with timeout and retries
+- **WebSocket** (`websocket`) - RFC 6455 WebSocket server
+- **TLS/HTTPS** (`tls`) - TLS configuration for secure servers
+- **Static File Server** (`static`) - Static file serving with MIME types
+- **Middleware** (`middleware`) - JWT, CORS, rate limit, logging, recovery
 - **Configuration** (`config`) - JSON configuration loading
-- **Logging** (`log`) - Structured logging with levels
+- **Logging** (`log`) - Structured logging with levels and file rotation
 - **Circuit Breaker** (`breaker`) - Hystrix-style circuit breaker
 - **Rate Limiter** (`limiter`) - Token bucket and sliding window
 - **Load Balancer** (`loadbalancer`) - Round robin, random, weighted, least connection
@@ -22,6 +26,10 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 - **Service Discovery** (`discovery`) - Static service discovery
 - **Distributed Tracing** (`trace`) - OpenTelemetry-compatible tracing
 - **Metrics** (`metric`) - Prometheus-compatible metrics
+- **Retry** (`retry`) - Exponential backoff with jitter
+- **Message Queue** (`mq`) - In-memory pub/sub messaging
+- **Cron Scheduler** (`cron`) - Scheduled task execution
+- **Lifecycle Management** (`lifecycle`) - Graceful shutdown hooks
 - **Validation** (`validate`) - Input validation utilities
 - **Local Cache** (`cache`) - In-memory LRU cache
 - **Distributed Lock** (`lock`) - Redis and local locks
@@ -70,6 +78,48 @@ const zigzero = b.dependency("zigzero", .{
 exe.root_module.addImport("zigzero", zigzero.module("zigzero"));
 ```
 
+## Project Structure
+
+Modules are organized following Zig best practices:
+
+```
+src/
+├── core/
+│   └── errors.zig          # Unified error types
+├── net/
+│   ├── api.zig             # HTTP server
+│   ├── http.zig            # HTTP client
+│   ├── rpc.zig             # RPC framework
+│   ├── websocket.zig       # WebSocket support
+│   └── tls.zig             # TLS/HTTPS
+├── server/
+│   ├── static.zig          # Static file serving
+│   └── middleware.zig      # JWT, CORS, rate limit, recovery
+├── infra/
+│   ├── log.zig             # Structured logging
+│   ├── redis.zig           # Redis client
+│   ├── pool.zig            # Connection pooling
+│   ├── cache.zig           # In-memory cache
+│   ├── mq.zig              # In-memory message queue
+│   ├── cron.zig            # Scheduled tasks
+│   ├── lifecycle.zig       # Graceful shutdown
+│   ├── health.zig          # Health checks
+│   ├── discovery.zig       # Service discovery
+│   ├── lock.zig            # Distributed locks
+│   ├── trace.zig           # Distributed tracing
+│   ├── metric.zig          # Prometheus metrics
+│   ├── retry.zig           # Exponential backoff retry
+│   ├── loadbalancer.zig    # Load balancing
+│   ├── breaker.zig         # Circuit breaker
+│   └── limiter.zig         # Rate limiting
+├── data/
+│   ├── orm.zig             # Query builder
+│   └── validate.zig        # Input validation
+├── config.zig              # Configuration management
+├── svc.zig                 # Service context (DI)
+└── zigzero.zig             # Root module exports
+```
+
 ## Examples
 
 See `examples/` directory for complete working examples:
@@ -105,29 +155,36 @@ zig build test
 
 ## Module Reference
 
-| Module | Description | Status |
-|--------|-------------|--------|
-| `api` | HTTP server, routing, middleware | ✅ Complete |
-| `rpc` | RPC framework over TCP | ✅ Complete |
-| `http` | HTTP client | ✅ Complete |
-| `config` | Configuration management | ✅ Complete |
-| `log` | Structured logging | ✅ Complete |
-| `breaker` | Circuit breaker | ✅ Complete |
-| `limiter` | Rate limiting | ✅ Complete |
-| `loadbalancer` | Load balancing | ✅ Complete |
-| `redis` | Redis client (RESP) | ✅ Complete |
-| `pool` | Connection pooling | ✅ Complete |
-| `health` | Health checks | ✅ Complete |
-| `discovery` | Service discovery | ✅ Complete |
-| `trace` | Distributed tracing | ✅ Complete |
-| `metric` | Prometheus metrics | ✅ Complete |
-| `validate` | Input validation | ✅ Complete |
-| `cache` | In-memory cache | ✅ Complete |
-| `lock` | Distributed locking | ✅ Complete |
-| `orm` | Query builder | ✅ Complete |
-| `svc` | Service context | ✅ Complete |
-| `middleware` | JWT, CORS, logging, recovery | ✅ Complete |
-| `errors` | Error types | ✅ Complete |
+| Module | Path | Description | Status |
+|--------|------|-------------|--------|
+| `api` | `net/api` | HTTP server, routing, middleware | ✅ Complete |
+| `rpc` | `net/rpc` | RPC framework over TCP | ✅ Complete |
+| `http` | `net/http` | HTTP client | ✅ Complete |
+| `websocket` | `net/websocket` | WebSocket server (RFC 6455) | ✅ Complete |
+| `tls` | `net/tls` | TLS/HTTPS configuration | ✅ Complete |
+| `static` | `server/static` | Static file serving | ✅ Complete |
+| `middleware` | `server/middleware` | JWT, CORS, rate limit, recovery | ✅ Complete |
+| `config` | `config` | Configuration management | ✅ Complete |
+| `svc` | `svc` | Service context / DI | ✅ Complete |
+| `log` | `infra/log` | Structured logging | ✅ Complete |
+| `redis` | `infra/redis` | Redis client (RESP) | ✅ Complete |
+| `pool` | `infra/pool` | Connection pooling | ✅ Complete |
+| `cache` | `infra/cache` | In-memory LRU cache | ✅ Complete |
+| `mq` | `infra/mq` | In-memory message queue | ✅ Complete |
+| `cron` | `infra/cron` | Scheduled task execution | ✅ Complete |
+| `lifecycle` | `infra/lifecycle` | Graceful shutdown hooks | ✅ Complete |
+| `health` | `infra/health` | Health probe registry | ✅ Complete |
+| `discovery` | `infra/discovery` | Static service discovery | ✅ Complete |
+| `lock` | `infra/lock` | Redis and local locks | ✅ Complete |
+| `trace` | `infra/trace` | Distributed tracing | ✅ Complete |
+| `metric` | `infra/metric` | Prometheus metrics | ✅ Complete |
+| `retry` | `infra/retry` | Exponential backoff retry | ✅ Complete |
+| `loadbalancer` | `infra/loadbalancer` | Load balancing algorithms | ✅ Complete |
+| `breaker` | `infra/breaker` | Circuit breaker | ✅ Complete |
+| `limiter` | `infra/limiter` | Token bucket / sliding window | ✅ Complete |
+| `orm` | `data/orm` | Query builder | ✅ Complete |
+| `validate` | `data/validate` | Input validation | ✅ Complete |
+| `errors` | `core/errors` | Unified error types | ✅ Complete |
 
 ## Requirements
 

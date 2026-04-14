@@ -3,7 +3,7 @@
 //! Provides database access layer aligned with go-zero's model pattern.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 /// Database connection configuration
 pub const Config = struct {

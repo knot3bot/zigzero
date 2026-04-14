@@ -3,7 +3,7 @@
 //! Provides service discovery patterns aligned with go-zero's discovery.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 const loadbalancer = @import("loadbalancer.zig");
 
 /// Service node

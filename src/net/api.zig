@@ -4,8 +4,8 @@
 //! Aligned with go-zero's rest package.
 
 const std = @import("std");
-const errors = @import("errors.zig");
-const log = @import("log.zig");
+const errors = @import("../core/errors.zig");
+const log = @import("../infra/log.zig");
 
 /// HTTP method
 pub const Method = enum {

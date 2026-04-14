@@ -3,7 +3,7 @@
 //! Provides exponential backoff retry aligned with go-zero patterns.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 /// Retry policy configuration
 pub const Policy = struct {

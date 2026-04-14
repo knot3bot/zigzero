@@ -3,9 +3,9 @@
 //! Provides common middleware implementations like auth, CORS, logging.
 
 const std = @import("std");
-const api = @import("api.zig");
-const errors = @import("errors.zig");
-const limiter = @import("limiter.zig");
+const api = @import("../net/api.zig");
+const errors = @import("../core/errors.zig");
+const limiter = @import("../infra/limiter.zig");
 
 /// JWT claims
 pub const Claims = struct {

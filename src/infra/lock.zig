@@ -3,7 +3,7 @@
 //! Provides distributed locking patterns aligned with go-zero.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 const redis = @import("redis.zig");
 
 /// Distributed lock interface

@@ -3,8 +3,8 @@
 //! Provides Redis operations aligned with go-zero's redis functionality.
 
 const std = @import("std");
-const errors = @import("errors.zig");
-const config = @import("config.zig");
+const errors = @import("../core/errors.zig");
+const config = @import("../config.zig");
 
 /// Redis client for zigzero
 pub const Redis = struct {

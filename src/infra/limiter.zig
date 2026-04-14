@@ -3,7 +3,7 @@
 //! Provides token bucket and sliding window rate limiting aligned with go-zero's limit.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 /// Rate limiter type
 pub const Type = enum {

@@ -3,8 +3,8 @@
 //! Provides structured logging with levels, rotation, and async support.
 
 const std = @import("std");
-const config = @import("config.zig");
-const errors = @import("errors.zig");
+const config = @import("../config.zig");
+const errors = @import("../core/errors.zig");
 
 /// Log level enum
 pub const Level = enum(u8) {

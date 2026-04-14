@@ -5,9 +5,9 @@
 
 const std = @import("std");
 const config = @import("config.zig");
-const log = @import("log.zig");
-const redis = @import("redis.zig");
-const rpc = @import("rpc.zig");
+const log = @import("infra/log.zig");
+const redis = @import("infra/redis.zig");
+const rpc = @import("net/rpc.zig");
 
 /// Service context holding all dependencies
 pub const Context = struct {

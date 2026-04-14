@@ -3,7 +3,7 @@
 //! Provides HTTP client with timeout, retries, and connection pooling.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 pub const Method = enum {
     GET,

@@ -3,7 +3,7 @@
 //! Provides input validation aligned with go-zero's validate patterns.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("../core/errors.zig");
 
 /// Validation result
 pub const Result = struct {

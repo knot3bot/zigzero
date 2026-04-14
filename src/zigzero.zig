@@ -16,35 +16,45 @@ const std = @import("std");
 pub const version = std.SemanticVersion{ .major = 0, .minor = 1, .patch = 0 };
 pub const name = "zigzero";
 
-// Core modules
-pub const api = @import("api.zig");
-pub const rpc = @import("rpc.zig");
+// Core
+pub const errors = @import("core/errors.zig");
+
+// Network
+pub const api = @import("net/api.zig");
+pub const http = @import("net/http.zig");
+pub const rpc = @import("net/rpc.zig");
+pub const websocket = @import("net/websocket.zig");
+pub const tls = @import("net/tls.zig");
+
+// Server
+pub const static = @import("server/static.zig");
+pub const middleware = @import("server/middleware.zig");
+
+// Infrastructure
+pub const log = @import("infra/log.zig");
+pub const redis = @import("infra/redis.zig");
+pub const pool = @import("infra/pool.zig");
+pub const cache = @import("infra/cache.zig");
+pub const mq = @import("infra/mq.zig");
+pub const cron = @import("infra/cron.zig");
+pub const lifecycle = @import("infra/lifecycle.zig");
+pub const health = @import("infra/health.zig");
+pub const discovery = @import("infra/discovery.zig");
+pub const lock = @import("infra/lock.zig");
+pub const trace = @import("infra/trace.zig");
+pub const metric = @import("infra/metric.zig");
+pub const retry = @import("infra/retry.zig");
+pub const loadbalancer = @import("infra/loadbalancer.zig");
+pub const breaker = @import("infra/breaker.zig");
+pub const limiter = @import("infra/limiter.zig");
+
+// Data
+pub const orm = @import("data/orm.zig");
+pub const validate = @import("data/validate.zig");
+
+// Config & Service
 pub const config = @import("config.zig");
-pub const log = @import("log.zig");
-pub const breaker = @import("breaker.zig");
-pub const limiter = @import("limiter.zig");
-pub const loadbalancer = @import("loadbalancer.zig");
-pub const redis = @import("redis.zig");
-pub const errors = @import("errors.zig");
-pub const middleware = @import("middleware.zig");
 pub const svc = @import("svc.zig");
-pub const trace = @import("trace.zig");
-pub const metric = @import("metric.zig");
-pub const orm = @import("orm.zig");
-pub const pool = @import("pool.zig");
-pub const health = @import("health.zig");
-pub const http = @import("http.zig");
-pub const validate = @import("validate.zig");
-pub const cache = @import("cache.zig");
-pub const discovery = @import("discovery.zig");
-pub const lock = @import("lock.zig");
-pub const lifecycle = @import("lifecycle.zig");
-pub const tls = @import("tls.zig");
-pub const retry = @import("retry.zig");
-pub const websocket = @import("websocket.zig");
-pub const static = @import("static.zig");
-pub const cron = @import("cron.zig");
-pub const mq = @import("mq.zig");
 
 test "zigzero version" {
     try std.testing.expectEqual(@as(u32, 0), version.major);

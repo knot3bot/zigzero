@@ -4,7 +4,7 @@
 //! Aligned with go-zero's config patterns.
 
 const std = @import("std");
-const errors = @import("errors.zig");
+const errors = @import("core/errors.zig");
 
 /// Main configuration structure
 pub const Config = struct {
