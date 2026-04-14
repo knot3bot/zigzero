@@ -91,6 +91,8 @@ pub const Context = struct {
     user_data: ?*anyopaque = null,
     trace_context: ?trace.TraceContext = null,
     validation_error_message: ?[]const u8 = null,
+    stream: ?std.net.Stream = null,
+    upgraded: bool = false,
 
     // Middleware chain fields
     chain_middlewares: []const Middleware = &.{},
@@ -864,8 +866,9 @@ pub const Server = struct {
     }
 
     fn handleConnection(self: *Server, conn: *std.net.Server.Connection) void {
+        var close_stream = true;
         defer {
-            conn.stream.close();
+            if (close_stream) conn.stream.close();
             self.allocator.destroy(conn);
         }
 
@@ -897,6 +900,7 @@ pub const Server = struct {
             return;
         };
         defer ctx.deinit();
+        ctx.stream = conn.stream;
 
         // Copy query params
         var query_iter = request.query.iterator();
@@ -958,6 +962,11 @@ pub const Server = struct {
         if (elapsed > self.request_timeout_ms) {
             const timeout_msg = std.fmt.allocPrint(arena_alloc, "Request timeout: {s} {s} took {d}ms", .{ request.method.toString(), request.path, elapsed }) catch "Request timeout";
             self.logger.warn(timeout_msg);
+        }
+
+        if (ctx.upgraded) {
+            close_stream = false;
+            return;
         }
 
         // Send response

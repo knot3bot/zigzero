@@ -45,7 +45,7 @@ pub const Conn = struct {
     /// Read a WebSocket frame
     pub fn readFrame(self: *Conn) !Frame {
         var header: [2]u8 = undefined;
-        _ = try self.stream.readAll(&header);
+        _ = try self.stream.readAtLeast(&header, header.len);
 
         const fin = (header[0] & 0x80) != 0;
         const opcode: Opcode = @enumFromInt(header[0] & 0x0F);
@@ -54,22 +54,22 @@ pub const Conn = struct {
 
         if (payload_len == 126) {
             var len_bytes: [2]u8 = undefined;
-            _ = try self.stream.readAll(&len_bytes);
+            _ = try self.stream.readAtLeast(&len_bytes, len_bytes.len);
             payload_len = @as(u64, std.mem.readInt(u16, &len_bytes, .big));
         } else if (payload_len == 127) {
             var len_bytes: [8]u8 = undefined;
-            _ = try self.stream.readAll(&len_bytes);
+            _ = try self.stream.readAtLeast(&len_bytes, len_bytes.len);
             payload_len = std.mem.readInt(u64, &len_bytes, .big);
         }
 
         var mask_key: [4]u8 = undefined;
         if (masked) {
-            _ = try self.stream.readAll(&mask_key);
+            _ = try self.stream.readAtLeast(&mask_key, mask_key.len);
         }
 
         const payload = try self.allocator.alloc(u8, payload_len);
         errdefer self.allocator.free(payload);
-        _ = try self.stream.readAll(payload);
+        _ = try self.stream.readAtLeast(payload, payload.len);
 
         if (masked) {
             for (payload, 0..) |*byte, i| {
@@ -176,9 +176,123 @@ pub fn upgrade(ctx: *api.Context, conn: std.net.Stream, allocator: std.mem.Alloc
     );
     defer allocator.free(response);
 
-    _ = try conn.stream.write(response);
-    return Conn.init(conn.stream, allocator);
+    _ = try conn.write(response);
+    return Conn.init(conn, allocator);
 }
+
+/// WebSocket room for managing a group of connections
+pub const Room = struct {
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    conns: std.AutoHashMap(*Conn, void),
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator, name: []const u8) !Room {
+        return .{
+            .allocator = allocator,
+            .name = try allocator.dupe(u8, name),
+            .conns = std.AutoHashMap(*Conn, void).init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *Room) void {
+        self.allocator.free(self.name);
+        self.conns.deinit();
+    }
+
+    /// Add a connection to the room
+    pub fn join(self: *Room, conn: *Conn) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        try self.conns.put(conn, {});
+    }
+
+    /// Remove a connection from the room
+    pub fn leave(self: *Room, conn: *Conn) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        _ = self.conns.remove(conn);
+    }
+
+    /// Broadcast a text message to all connections in the room
+    pub fn broadcast(self: *Room, data: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var iter = self.conns.keyIterator();
+        while (iter.next()) |conn_ptr| {
+            const conn = conn_ptr.*;
+            if (!conn.closed.load(.monotonic)) {
+                conn.writeText(data) catch {};
+            }
+        }
+    }
+
+    /// Number of connections in the room
+    pub fn size(self: *Room) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.conns.count();
+    }
+};
+
+/// WebSocket hub for managing multiple rooms
+pub const Hub = struct {
+    allocator: std.mem.Allocator,
+    rooms: std.StringHashMap(*Room),
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator) Hub {
+        return .{
+            .allocator = allocator,
+            .rooms = std.StringHashMap(*Room).init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *Hub) void {
+        self.mutex.lock();
+        var iter = self.rooms.valueIterator();
+        while (iter.next()) |room_ptr| {
+            room_ptr.*.deinit();
+            self.allocator.destroy(room_ptr.*);
+        }
+        self.rooms.deinit();
+    }
+
+    /// Get an existing room or create a new one
+    pub fn room(self: *Hub, name: []const u8) !*Room {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.rooms.get(name)) |r| return r;
+
+        const r = try self.allocator.create(Room);
+        r.* = try Room.init(self.allocator, name);
+        try self.rooms.put(r.name, r);
+        return r;
+    }
+
+    /// Remove a room and all its connections
+    pub fn removeRoom(self: *Hub, name: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.rooms.fetchRemove(name)) |kv| {
+            kv.value.deinit();
+            self.allocator.destroy(kv.value);
+        }
+    }
+
+    /// Broadcast a text message to all rooms
+    pub fn broadcastAll(self: *Hub, data: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        var iter = self.rooms.valueIterator();
+        while (iter.next()) |room_ptr| {
+            room_ptr.*.broadcast(data);
+        }
+    }
+};
 
 test "websocket accept key" {
     const allocator = std.testing.allocator;
@@ -186,4 +300,37 @@ test "websocket accept key" {
     const accept = try computeAcceptKey(allocator, key);
     defer allocator.free(accept);
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", accept);
+}
+
+test "websocket room" {
+    const allocator = std.testing.allocator;
+    var room = try Room.init(allocator, "test-room");
+    defer room.deinit();
+
+    // Create a dummy connection (won't actually write)
+    var conn = Conn{
+        .stream = undefined,
+        .allocator = allocator,
+        .closed = std.atomic.Value(bool).init(false),
+    };
+
+    try room.join(&conn);
+    try std.testing.expectEqual(@as(usize, 1), room.size());
+
+    room.leave(&conn);
+    try std.testing.expectEqual(@as(usize, 0), room.size());
+}
+
+test "websocket hub" {
+    const allocator = std.testing.allocator;
+    var hub = Hub.init(allocator);
+    defer hub.deinit();
+
+    const r = try hub.room("room1");
+    try std.testing.expectEqualStrings("room1", r.name);
+
+    const r2 = try hub.room("room1");
+    try std.testing.expectEqual(r, r2);
+
+    hub.removeRoom("room1");
 }

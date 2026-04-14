@@ -6,6 +6,7 @@ const health = zigzero.health;
 const middleware = zigzero.middleware;
 const metric = zigzero.metric;
 const load = zigzero.load;
+const websocket = zigzero.websocket;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -32,6 +33,10 @@ pub fn main() !void {
     // Create adaptive load shedder
     var shedder = try load.newAdaptiveShedder(allocator, .{});
     defer shedder.deinit();
+
+    // Create WebSocket hub
+    var hub = websocket.Hub.init(allocator);
+    defer hub.deinit();
 
     // Create HTTP server
     var server = api.Server.init(allocator, 8080, logger);
@@ -135,6 +140,43 @@ pub fn main() !void {
                 });
             }
         }.handle,
+    });
+
+    // WebSocket chat endpoint with room broadcasting
+    try server.addRoute(.{
+        .method = .GET,
+        .path = "/ws/chat",
+        .handler = struct {
+            fn handle(ctx: *api.Context) !void {
+                if (ctx.stream == null) return error.ServerError;
+                var ws_conn = try websocket.upgrade(ctx, ctx.stream.?, std.heap.page_allocator);
+                ctx.upgraded = true;
+
+                const h = @as(*websocket.Hub, @ptrCast(@alignCast(ctx.user_data.?)));
+                const room = try h.room("chat");
+                try room.join(&ws_conn);
+
+                const t = std.Thread.spawn(.{}, struct {
+                    fn run(conn_ptr: *websocket.Conn, r: *websocket.Room) void {
+                        defer {
+                            r.leave(conn_ptr);
+                            conn_ptr.close();
+                        }
+                        while (!conn_ptr.closed.load(.monotonic)) {
+                            var frame = conn_ptr.readFrame() catch break;
+                            defer frame.deinit();
+                            switch (frame.opcode) {
+                                .text => r.broadcast(frame.payload),
+                                .close => break,
+                                else => {},
+                            }
+                        }
+                    }
+                }.run, .{ &ws_conn, room }) catch return error.ServerError;
+                t.detach();
+            }
+        }.handle,
+        .user_data = &hub,
     });
 
     logger.info("Starting API server on port 8080");
