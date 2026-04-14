@@ -67,21 +67,23 @@ pub const TokenBucket = struct {
 
 /// Sliding window rate limiter
 pub const SlidingWindow = struct {
+    allocator: std.mem.Allocator,
     rate: f64, // Max requests per second
     window_size_ns: i64, // Window size in nanoseconds
-    requests: []i64, // Timestamps of recent requests
-    capacity: u32,
-    head: u32 = 0,
+    requests: std.ArrayList(i64), // Timestamps of recent requests
 
     /// Create a new sliding window limiter
-    pub fn new(rate: f64, window_sec: u32) SlidingWindow {
-        const capacity = @as(u32, @intFromFloat(@ceil(rate * @as(f64, @floatFromInt(window_sec)) * 2.0)));
+    pub fn init(allocator: std.mem.Allocator, rate: f64, window_sec: u32) !SlidingWindow {
         return SlidingWindow{
+            .allocator = allocator,
             .rate = rate,
             .window_size_ns = @as(i64, @intCast(window_sec)) * 1_000_000_000,
-            .requests = &.{},
-            .capacity = capacity,
+            .requests = std.ArrayList(i64){},
         };
+    }
+
+    pub fn deinit(self: *SlidingWindow) void {
+        self.requests.deinit(self.allocator);
     }
 
     /// Try to allow a request
@@ -89,13 +91,24 @@ pub const SlidingWindow = struct {
         const now = std.time.nanoTimestamp();
         const window_start = now - self.window_size_ns;
 
-        // Count requests in current window
-        var count: u32 = 0;
-        for (self.requests) |ts| {
-            if (ts > window_start) count += 1;
+        // Remove expired requests
+        var i: usize = 0;
+        while (i < self.requests.items.len) {
+            if (self.requests.items[i] <= window_start) {
+                _ = self.requests.orderedRemove(i);
+            } else {
+                i += 1;
+            }
         }
 
-        return count < @as(u32, @intFromFloat(self.rate));
+        // Check if under limit
+        const count = @as(u32, @intCast(self.requests.items.len));
+        if (count < @as(u32, @intFromFloat(self.rate))) {
+            self.requests.append(self.allocator, now) catch return false;
+            return true;
+        }
+
+        return false;
     }
 };
 

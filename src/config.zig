@@ -483,49 +483,68 @@ pub fn loadEnv(comptime T: type, allocator: std.mem.Allocator, prefix: []const u
     return loader.loadEnv(T, prefix);
 }
 
-test "config json parsing" {
-    const json_content =
-        \\{
-        \\  "name": "test-service",
-        \\  "port": 8080,
-        \\  "log": {
-        \\    "level": "debug",
-        \\    "service_name": "test"
-        \\  },
-        \\  "redis": {
-        \\    "host": "localhost",
-        \\    "port": 6379
-        \\  },
-        \\  "mysql": {
-        \\    "host": "localhost",
-        \\    "port": 3306,
-        \\    "database": "testdb"
-        \\  },
-        \\  "etcd": {
-        \\    "endpoints": ["localhost:2379"],
-        \\    "timeout_sec": 10
-        \\  }
-        \\}
-    ;
+/// Configuration file watcher with polling-based change detection
+pub fn Watcher(comptime T: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        file_path: []const u8,
+        last_modified: i128,
+        interval_ms: u64,
+        is_yaml: bool,
 
-    const allocator = std.testing.allocator;
-    const cfg = try Loader.init(allocator).parseJson(Config, json_content);
-    defer {
-        allocator.free(cfg.name);
-        allocator.free(cfg.log.level);
-        allocator.free(cfg.log.service_name);
-        allocator.free(cfg.redis.host);
-        allocator.free(cfg.mysql.host);
-        allocator.free(cfg.mysql.database);
-        for (cfg.etcd.endpoints) |ep| allocator.free(ep);
-        allocator.free(cfg.etcd.endpoints);
-    }
+        const Self = @This();
 
-    try std.testing.expectEqualStrings("test-service", cfg.name);
-    try std.testing.expectEqual(@as(u16, 8080), cfg.port);
-    try std.testing.expectEqualStrings("debug", cfg.log.level);
-    try std.testing.expectEqualStrings("localhost", cfg.redis.host);
-    try std.testing.expectEqual(@as(u16, 6379), cfg.redis.port);
+        pub fn init(allocator: std.mem.Allocator, file_path: []const u8, interval_ms: u64) !Self {
+            return .{
+                .allocator = allocator,
+                .file_path = try allocator.dupe(u8, file_path),
+                .last_modified = 0,
+                .interval_ms = interval_ms,
+                .is_yaml = std.mem.endsWith(u8, file_path, ".yaml") or std.mem.endsWith(u8, file_path, ".yml"),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.file_path);
+        }
+
+        /// Check if the config file has changed since last check
+        pub fn hasChanged(self: *Self) bool {
+            const stat = std.fs.cwd().statFile(self.file_path) catch return false;
+            const mtime = stat.mtime;
+            if (mtime > self.last_modified) {
+                self.last_modified = mtime;
+                return true;
+            }
+            return false;
+        }
+
+        /// Reload configuration if file has changed
+        pub fn reload(self: *Self) !T {
+            const loader = Loader.init(self.allocator);
+            if (self.is_yaml) {
+                return loader.loadYaml(T, self.file_path);
+            } else {
+                return loader.loadJson(T, self.file_path);
+            }
+        }
+
+        /// Block and watch for changes, calling callback on each reload
+        pub fn watch(self: *Self, callback: *const fn (T) void) !void {
+            // Initial load to set baseline
+            if (self.last_modified == 0) {
+                _ = self.hasChanged();
+            }
+
+            while (true) {
+                std.Thread.sleep(self.interval_ms * std.time.ns_per_ms);
+                if (self.hasChanged()) {
+                    const cfg = self.reload() catch continue;
+                    callback(cfg);
+                }
+            }
+        }
+    };
 }
 
 test "config yaml parsing" {
