@@ -5,6 +5,7 @@
 const std = @import("std");
 const errors = @import("../core/errors.zig");
 const loadbalancer = @import("loadbalancer.zig");
+const etcd = @import("etcd.zig");
 
 /// Service node
 pub const Node = struct {
@@ -92,6 +93,151 @@ pub const StaticDiscovery = struct {
             lb.addEndpoint(node.address);
         }
         return lb;
+    }
+};
+
+/// etcd-based service discovery
+pub const EtcdDiscovery = struct {
+    allocator: std.mem.Allocator,
+    etcd: etcd.Client,
+    lease_id: i64,
+    keepalive_running: std.atomic.Value(bool),
+    keepalive_thread: ?std.Thread = null,
+    registered: std.StringHashMap(void),
+
+    pub fn init(allocator: std.mem.Allocator, etcd_endpoint: []const u8, ttl: i64) !EtcdDiscovery {
+        var client = try etcd.Client.init(allocator, etcd_endpoint);
+        errdefer client.deinit();
+
+        const lease_id = try client.leaseGrant(ttl);
+
+        var self = EtcdDiscovery{
+            .allocator = allocator,
+            .etcd = client,
+            .lease_id = lease_id,
+            .keepalive_running = std.atomic.Value(bool).init(true),
+            .keepalive_thread = null,
+            .registered = std.StringHashMap(void).init(allocator),
+        };
+
+        self.keepalive_thread = try std.Thread.spawn(.{}, keepAliveLoop, .{ &self, ttl });
+        return self;
+    }
+
+    pub fn deinit(self: *EtcdDiscovery) void {
+        self.keepalive_running.store(false, .monotonic);
+        if (self.keepalive_thread) |t| t.join();
+
+        var iter = self.registered.keyIterator();
+        while (iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.registered.deinit();
+        self.etcd.deinit();
+    }
+
+    /// Register a node for a service
+    pub fn register(self: *EtcdDiscovery, service_name: []const u8, node: Node) !void {
+        const key = try std.fmt.allocPrint(self.allocator, "/etcd-registry/{s}/{s}", .{ service_name, node.id });
+        defer self.allocator.free(key);
+
+        const value = try std.json.valueAlloc(self.allocator, .{
+            .id = node.id,
+            .address = node.address,
+            .weight = node.weight,
+            .is_healthy = node.is_healthy,
+        }, .{});
+        defer self.allocator.free(value);
+
+        try self.etcd.put(key, value, self.lease_id);
+
+        const name_copy = try self.allocator.dupe(u8, service_name);
+        try self.registered.put(name_copy, {});
+    }
+
+    /// Deregister a node
+    pub fn deregister(self: *EtcdDiscovery, service_name: []const u8, node_id: []const u8) !void {
+        const key = try std.fmt.allocPrint(self.allocator, "/etcd-registry/{s}/{s}", .{ service_name, node_id });
+        defer self.allocator.free(key);
+        try self.etcd.delete(key);
+    }
+
+    /// Get nodes for a service
+    pub fn getNodes(self: *EtcdDiscovery, service_name: []const u8) !?[]Node {
+        const prefix = try std.fmt.allocPrint(self.allocator, "/etcd-registry/{s}/", .{service_name});
+        defer self.allocator.free(prefix);
+
+        var kvs = try self.etcd.getPrefix(prefix);
+        defer {
+            for (kvs.items) |*kv| kv.deinit(self.etcd.allocator);
+            kvs.deinit();
+        }
+
+        if (kvs.items.len == 0) return null;
+
+        var nodes = try self.allocator.alloc(Node, kvs.items.len);
+        errdefer {
+            for (nodes) |*n| n.deinit(self.allocator);
+            self.allocator.free(nodes);
+        }
+
+        for (kvs.items, 0..) |kv, i| {
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, kv.value, .{}) catch {
+                nodes[i] = .{
+                    .id = try self.allocator.dupe(u8, "unknown"),
+                    .address = try self.allocator.dupe(u8, "unknown"),
+                    .weight = 1,
+                    .metadata = std.StringHashMap([]const u8).init(self.allocator),
+                    .is_healthy = true,
+                };
+                continue;
+            };
+            defer parsed.deinit();
+
+            const id = if (parsed.value.object.get("id")) |v| if (v == .string) v.string else "unknown" else "unknown";
+            const address = if (parsed.value.object.get("address")) |v| if (v == .string) v.string else "unknown" else "unknown";
+            const weight = if (parsed.value.object.get("weight")) |v| switch (v) {
+                .integer => @as(u32, @intCast(v.integer)),
+                else => 1,
+            } else 1;
+            const is_healthy = if (parsed.value.object.get("is_healthy")) |v| switch (v) {
+                .bool => v.bool,
+                else => true,
+            } else true;
+
+            nodes[i] = .{
+                .id = try self.allocator.dupe(u8, id),
+                .address = try self.allocator.dupe(u8, address),
+                .weight = weight,
+                .metadata = std.StringHashMap([]const u8).init(self.allocator),
+                .is_healthy = is_healthy,
+            };
+        }
+
+        return nodes;
+    }
+
+    /// Build a load balancer for a service
+    pub fn loadBalancer(self: *EtcdDiscovery, service_name: []const u8) !?loadbalancer.LoadBalancer {
+        const nodes = try self.getNodes(service_name) orelse return null;
+        defer {
+            for (nodes) |*n| n.deinit(self.allocator);
+            self.allocator.free(nodes);
+        }
+
+        var lb = loadbalancer.LoadBalancer.init(self.allocator, .round_robin);
+        for (nodes) |node| {
+            lb.addEndpoint(node.address);
+        }
+        return lb;
+    }
+
+    fn keepAliveLoop(self: *EtcdDiscovery, ttl: i64) void {
+        const interval_ms = @max(1000, @as(u64, @intCast(ttl)) * 1000 / 3);
+        while (self.keepalive_running.load(.monotonic)) {
+            self.etcd.keepAlive(self.lease_id) catch {};
+            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+        }
     }
 };
 

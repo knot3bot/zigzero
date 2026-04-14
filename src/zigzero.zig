@@ -51,6 +51,7 @@ pub const lock = @import("infra/lock.zig");
 pub const trace = @import("infra/trace.zig");
 pub const metric = @import("infra/metric.zig");
 pub const retry = @import("infra/retry.zig");
+pub const etcd = @import("infra/etcd.zig");
 pub const sqlx = @import("infra/sqlx.zig");
 pub const loadbalancer = @import("infra/loadbalancer.zig");
 pub const breaker = @import("infra/breaker.zig");
@@ -93,6 +94,7 @@ comptime {
     _ = orm.Pool;
     _ = health.Registry;
     _ = discovery.StaticDiscovery;
+    _ = discovery.EtcdDiscovery;
     _ = lock.Lock;
     _ = lifecycle.Manager;
     _ = tls.Config;

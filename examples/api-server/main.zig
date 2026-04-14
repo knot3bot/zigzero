@@ -7,6 +7,7 @@ const middleware = zigzero.middleware;
 const metric = zigzero.metric;
 const load = zigzero.load;
 const websocket = zigzero.websocket;
+const discovery = zigzero.discovery;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -37,6 +38,15 @@ pub fn main() !void {
     // Create WebSocket hub
     var hub = websocket.Hub.init(allocator);
     defer hub.deinit();
+
+    // Create static service discovery
+    var static_discovery = discovery.StaticDiscovery.init(allocator);
+    defer static_discovery.deinit();
+    const service_nodes = &[_]discovery.Node{
+        .{ .id = "node1", .address = "127.0.0.1:8081", .metadata = std.StringHashMap([]const u8).init(allocator) },
+        .{ .id = "node2", .address = "127.0.0.1:8082", .metadata = std.StringHashMap([]const u8).init(allocator) },
+    };
+    try static_discovery.register("user-service", service_nodes);
 
     // Create HTTP server
     var server = api.Server.init(allocator, 8080, logger);
@@ -177,6 +187,29 @@ pub fn main() !void {
             }
         }.handle,
         .user_data = &hub,
+    });
+
+    // Service discovery endpoint
+    try server.addRoute(.{
+        .method = .GET,
+        .path = "/discover/:service",
+        .handler = struct {
+            fn handle(ctx: *api.Context) !void {
+                const service_name = ctx.param("service") orelse return error.InvalidParameter;
+                const disc = @as(*discovery.StaticDiscovery, @ptrCast(@alignCast(ctx.user_data.?)));
+                if (disc.getNodes(service_name)) |nodes| {
+                    var endpoints: std.ArrayList([]const u8) = .{};
+                    defer endpoints.deinit(ctx.allocator);
+                    for (nodes) |node| {
+                        try endpoints.append(ctx.allocator, node.address);
+                    }
+                    try ctx.jsonStruct(200, .{ .service = service_name, .nodes = endpoints.items });
+                } else {
+                    try ctx.sendError(404, "service not found");
+                }
+            }
+        }.handle,
+        .user_data = &static_discovery,
     });
 
     logger.info("Starting API server on port 8080");
