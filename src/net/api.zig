@@ -405,44 +405,158 @@ const ParsedRequest = struct {
     }
 };
 
-/// Router for matching routes
+/// Trie node for the router
+const TrieNode = struct {
+    segment: []const u8,
+    is_param: bool,
+    param_name: ?[]const u8,
+    route: ?Route,
+    children: std.ArrayList(*TrieNode),
+
+    pub fn init(allocator: std.mem.Allocator, segment: []const u8) !*TrieNode {
+        const node = try allocator.create(TrieNode);
+        node.* = .{
+            .segment = try allocator.dupe(u8, segment),
+            .is_param = std.mem.startsWith(u8, segment, "{"),
+            .param_name = null,
+            .route = null,
+            .children = .{},
+        };
+        if (node.is_param) {
+            const name = if (std.mem.endsWith(u8, segment, "}"))
+                segment[1 .. segment.len - 1]
+            else
+                segment[1..];
+            node.param_name = try allocator.dupe(u8, name);
+        }
+        return node;
+    }
+
+    pub fn deinit(self: *TrieNode, allocator: std.mem.Allocator) void {
+        allocator.free(self.segment);
+        if (self.param_name) |name| allocator.free(name);
+        if (self.route) |route| allocator.free(route.path);
+        for (self.children.items) |child| {
+            child.deinit(allocator);
+        }
+        self.children.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    pub fn findChild(self: *const TrieNode, segment: []const u8) ?*TrieNode {
+        for (self.children.items) |child| {
+            if (std.mem.eql(u8, child.segment, segment)) return child;
+        }
+        return null;
+    }
+
+    pub fn findParamChild(self: *const TrieNode) ?*TrieNode {
+        for (self.children.items) |child| {
+            if (child.is_param) return child;
+        }
+        return null;
+    }
+};
+
+/// Router for matching routes using a trie
 const Router = struct {
     allocator: std.mem.Allocator,
-    routes: std.ArrayList(Route),
+    roots: std.AutoHashMap(Method, *TrieNode),
 
     pub fn init(allocator: std.mem.Allocator) Router {
         return .{
             .allocator = allocator,
-            .routes = std.ArrayList(Route){},
+            .roots = std.AutoHashMap(Method, *TrieNode).init(allocator),
         };
     }
 
     pub fn deinit(self: *Router) void {
-        for (self.routes.items) |route| {
-            self.allocator.free(route.path);
+        var iter = self.roots.valueIterator();
+        while (iter.next()) |root| {
+            root.*.deinit(self.allocator);
         }
-        self.routes.deinit(self.allocator);
+        self.roots.deinit();
     }
 
     pub fn addRoute(self: *Router, route: Route) !void {
+        const root = try self.getOrCreateRoot(route.method);
+
+        var parts = std.mem.splitScalar(u8, route.path, '/');
+        var current = root;
+
+        while (parts.next()) |part| {
+            if (part.len == 0) continue;
+
+            if (current.findChild(part)) |child| {
+                current = child;
+            } else {
+                const child = try TrieNode.init(self.allocator, part);
+                try current.children.append(self.allocator, child);
+                current = child;
+            }
+        }
+
+        // Store route at the endpoint node
         const path_copy = try self.allocator.dupe(u8, route.path);
         var r = route;
         r.path = path_copy;
-        try self.routes.append(self.allocator, r);
+        current.route = r;
+    }
+
+    fn getOrCreateRoot(self: *Router, method: Method) !*TrieNode {
+        if (self.roots.get(method)) |root| return root;
+        const root = try TrieNode.init(self.allocator, "");
+        try self.roots.put(method, root);
+        return root;
     }
 
     pub fn match(self: *const Router, method: Method, path: []const u8) ?MatchedRoute {
-        for (self.routes.items) |route| {
-            if (route.method != method) continue;
+        const root = self.roots.get(method) orelse return null;
 
-            const params = matchPath(route.path, path) catch continue;
-            if (params != null) {
-                return MatchedRoute{
-                    .route = route,
-                    .params = params.?,
+        var params = std.StringHashMap([]const u8).init(self.allocator);
+        errdefer {
+            var iter = params.iterator();
+            while (iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+            params.deinit();
+        }
+
+        var parts = std.mem.splitScalar(u8, path, '/');
+        var current = root;
+
+        while (parts.next()) |part| {
+            if (part.len == 0) continue;
+
+            if (current.findChild(part)) |child| {
+                current = child;
+            } else if (current.findParamChild()) |param_child| {
+                const key = self.allocator.dupe(u8, param_child.param_name.?) catch return null;
+                const value = self.allocator.dupe(u8, part) catch {
+                    self.allocator.free(key);
+                    return null;
                 };
+                params.put(key, value) catch {
+                    self.allocator.free(key);
+                    self.allocator.free(value);
+                    return null;
+                };
+                current = param_child;
+            } else {
+                params.deinit();
+                return null;
             }
         }
+
+        if (current.route) |route| {
+            return MatchedRoute{
+                .route = route,
+                .params = params,
+            };
+        }
+
+        params.deinit();
         return null;
     }
 };
@@ -451,48 +565,6 @@ const MatchedRoute = struct {
     route: Route,
     params: std.StringHashMap([]const u8),
 };
-
-fn matchPath(pattern: []const u8, path: []const u8) !?std.StringHashMap([]const u8) {
-    var params = std.StringHashMap([]const u8).init(std.heap.page_allocator);
-    errdefer {
-        var iter = params.iterator();
-        while (iter.next()) |entry| {
-            std.heap.page_allocator.free(entry.key_ptr.*);
-            std.heap.page_allocator.free(entry.value_ptr.*);
-        }
-        params.deinit();
-    }
-
-    var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
-    var path_parts = std.mem.splitScalar(u8, path, '/');
-
-    while (pattern_parts.next()) |p_part| {
-        const path_part = path_parts.next() orelse return null;
-
-        if (p_part.len == 0 and path_part.len == 0) continue;
-        if (p_part.len == 0) continue;
-        if (path_part.len == 0 and p_part.len > 0) return null;
-
-        if (std.mem.startsWith(u8, p_part, "{")) {
-            // Parameter
-            const param_name = if (std.mem.endsWith(u8, p_part, "}"))
-                p_part[1 .. p_part.len - 1]
-            else
-                p_part[1..];
-
-            const key = try std.heap.page_allocator.dupe(u8, param_name);
-            const value = try std.heap.page_allocator.dupe(u8, path_part);
-            try params.put(key, value);
-        } else if (!std.mem.eql(u8, p_part, path_part)) {
-            return null;
-        }
-    }
-
-    // Check if there are extra path parts
-    if (path_parts.next() != null) return null;
-
-    return params;
-}
 
 /// HTTP response writer
 const ResponseWriter = struct {
@@ -858,22 +930,37 @@ test "api server" {
 }
 
 test "path matching" {
-    var params = try matchPath("/users/{id}", "/users/123");
-    if (params) |*p| {
-        defer {
-            var iter = p.iterator();
-            while (iter.next()) |entry| {
-                std.heap.page_allocator.free(entry.key_ptr.*);
-                std.heap.page_allocator.free(entry.value_ptr.*);
+    var router = Router.init(std.testing.allocator);
+    defer router.deinit();
+
+    const route = Route{
+        .method = .GET,
+        .path = "/users/{id}",
+        .handler = struct {
+            fn handle(ctx: *Context) anyerror!void {
+                _ = ctx;
             }
-            p.deinit();
+        }.handle,
+    };
+
+    try router.addRoute(route);
+
+    var matched = router.match(.GET, "/users/123");
+    if (matched) |*m| {
+        defer {
+            var iter = m.params.iterator();
+            while (iter.next()) |entry| {
+                std.testing.allocator.free(entry.key_ptr.*);
+                std.testing.allocator.free(entry.value_ptr.*);
+            }
+            m.params.deinit();
         }
-        try std.testing.expectEqualStrings("123", p.get("id").?);
+        try std.testing.expectEqualStrings("123", m.params.get("id").?);
     } else {
         try std.testing.expect(false);
     }
 
-    const no_match = try matchPath("/users/{id}", "/posts/123");
+    const no_match = router.match(.GET, "/posts/123");
     try std.testing.expect(no_match == null);
 }
 

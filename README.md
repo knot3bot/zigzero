@@ -8,7 +8,7 @@ ZigZero is a high-performance microservice framework written in Zig, inspired by
 
 ## Features
 
-- **HTTP Server** (`api`) - Full HTTP server with routing, middleware, JSON parsing, route groups, and struct-tag auto parameter binding
+- **HTTP Server** (`api`) - Full HTTP server with trie-based routing, middleware, JSON parsing, route groups, and struct-tag auto parameter binding
 - **RPC Framework** (`rpc`) - Binary protocol RPC over TCP with circuit breaker
 - **HTTP Client** (`http`) - HTTP client with timeout and retries
 - **WebSocket** (`websocket`) - RFC 6455 WebSocket server
