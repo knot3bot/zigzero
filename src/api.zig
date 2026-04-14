@@ -71,6 +71,11 @@ pub const Context = struct {
     responded: bool = false,
     logger: log.Logger,
 
+    // Middleware chain fields
+    chain_middlewares: []const *const fn (*Context, *const fn (*Context) anyerror!void) anyerror!void = &.{},
+    chain_handler: *const fn (*Context) anyerror!void = undefined,
+    chain_index: usize = 0,
+
     pub fn init(allocator: std.mem.Allocator, method: Method, path: []const u8, logger: log.Logger) !Context {
         return Context{
             .allocator = allocator,
@@ -564,16 +569,7 @@ pub const Server = struct {
             }
 
             // Execute handler with middleware chain
-            const final_handler = struct {
-                fn handler(c: *Context) !void {
-                    const route: Route = @ptrCast(@alignCast(c.route.?));
-                    try route.handler(c);
-                }
-            }.handler;
-
-            ctx.route = @ptrFromInt(@intFromPtr(&m.route));
-
-            self.executeWithMiddleware(&ctx, final_handler) catch |err| {
+            self.executeWithMiddleware(&ctx, m.route.handler) catch |err| {
                 if (!ctx.responded) {
                     ctx.sendError(500, @errorName(err)) catch {};
                 }
@@ -614,23 +610,7 @@ pub const Server = struct {
     }
 };
 
-// Context extension fields for middleware chain
-const ContextExt = struct {
-    route: ?*const Route = null,
-    chain_middlewares: []const MiddlewareFn = &.{},
-    chain_handler: HandlerFn = undefined,
-    chain_index: usize = 0,
-};
-
-/// Internal fields for Context
-const ContextInternal = struct {
-    route: ?*const Route,
-    chain_middlewares: []const MiddlewareFn,
-    chain_handler: HandlerFn,
-    chain_index: usize,
-};
-
-/// Request/Response type wrapper
+// Request/Response type wrapper
 pub fn Request(comptime T: type) type {
     return struct {
         body: T,

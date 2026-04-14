@@ -31,6 +31,13 @@ pub const svc = @import("svc.zig");
 pub const trace = @import("trace.zig");
 pub const metric = @import("metric.zig");
 pub const orm = @import("orm.zig");
+pub const pool = @import("pool.zig");
+pub const health = @import("health.zig");
+pub const http = @import("http.zig");
+pub const validate = @import("validate.zig");
+pub const cache = @import("cache.zig");
+pub const discovery = @import("discovery.zig");
+pub const lock = @import("lock.zig");
 
 test "zigzero version" {
     try std.testing.expectEqual(@as(u32, 0), version.major);
