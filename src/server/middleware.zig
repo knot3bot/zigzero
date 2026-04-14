@@ -249,6 +249,24 @@ pub fn rateLimit(bucket: *limiter.TokenBucket) api.Middleware {
     };
 }
 
+/// IP-based rate limiting middleware
+pub fn rateLimitByIp(ip_limiter: *limiter.IpLimiter) api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const limit = @as(*limiter.IpLimiter, @ptrCast(@alignCast(data.?)));
+                const ip = ctx.headers.get("X-Forwarded-For") orelse ctx.headers.get("X-Real-Ip") orelse "unknown";
+                if (!limit.allow(ip)) {
+                    try ctx.sendError(429, "rate limit exceeded");
+                    return;
+                }
+                try next(ctx);
+            }
+        }.middleware,
+        .user_data = ip_limiter,
+    };
+}
+
 /// Logging middleware
 pub fn logging() api.Middleware {
     return .{

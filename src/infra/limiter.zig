@@ -112,6 +112,82 @@ pub const SlidingWindow = struct {
     }
 };
 
+/// IP-based rate limiter using token buckets per client
+pub const IpLimiter = struct {
+    allocator: std.mem.Allocator,
+    rate: f64,
+    burst: u32,
+    buckets: std.StringHashMap(TokenBucket),
+    mutex: std.Thread.Mutex,
+    last_cleanup: i64,
+    cleanup_interval_ms: i64,
+
+    pub fn init(allocator: std.mem.Allocator, rate: f64, burst: u32) IpLimiter {
+        return .{
+            .allocator = allocator,
+            .rate = rate,
+            .burst = burst,
+            .buckets = std.StringHashMap(TokenBucket).init(allocator),
+            .mutex = .{},
+            .last_cleanup = std.time.milliTimestamp(),
+            .cleanup_interval_ms = 60000, // cleanup every 60s
+        };
+    }
+
+    pub fn deinit(self: *IpLimiter) void {
+        var iter = self.buckets.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.buckets.deinit();
+    }
+
+    /// Check if request from ip is allowed
+    pub fn allow(self: *IpLimiter, ip: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const gop = self.buckets.getOrPut(ip) catch return false;
+        if (!gop.found_existing) {
+            gop.key_ptr.* = self.allocator.dupe(u8, ip) catch return false;
+            gop.value_ptr.* = TokenBucket.new(self.rate, self.burst);
+        }
+
+        const result = gop.value_ptr.allow();
+
+        // Periodic cleanup of stale buckets
+        const now = std.time.milliTimestamp();
+        if (now - self.last_cleanup > self.cleanup_interval_ms) {
+            self.last_cleanup = now;
+            self.cleanupStaleBuckets();
+        }
+
+        return result;
+    }
+
+    fn cleanupStaleBuckets(self: *IpLimiter) void {
+        const now = std.time.nanoTimestamp();
+        var iter = self.buckets.iterator();
+        var to_remove: std.ArrayList([]const u8) = .{};
+        defer {
+            for (to_remove.items) |k| self.allocator.free(k);
+            to_remove.deinit(self.allocator);
+        }
+
+        while (iter.next()) |entry| {
+            // Remove buckets that haven't been used in 5 minutes
+            const elapsed = @as(f64, @floatFromInt(now - entry.value_ptr.last_update)) / 1_000_000_000.0;
+            if (elapsed > 300) {
+                to_remove.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (to_remove.items) |k| {
+            _ = self.buckets.remove(k);
+        }
+    }
+};
+
 /// Global rate limiter storage
 var global_limiters: std.StringHashMapUnmanaged(TokenBucket) = .{};
 
@@ -139,4 +215,18 @@ test "token bucket" {
 
     // Should deny when exhausted
     try std.testing.expect(!tb.allow());
+}
+
+test "ip limiter" {
+    const allocator = std.testing.allocator;
+    var limiter = IpLimiter.init(allocator, 2.0, 2);
+    defer limiter.deinit();
+
+    try std.testing.expect(limiter.allow("192.168.1.1"));
+    try std.testing.expect(limiter.allow("192.168.1.1"));
+    try std.testing.expect(!limiter.allow("192.168.1.1"));
+
+    // Different IP should have its own bucket
+    try std.testing.expect(limiter.allow("192.168.1.2"));
+    try std.testing.expect(limiter.allow("192.168.1.2"));
 }

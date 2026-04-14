@@ -8,6 +8,7 @@ const metric = zigzero.metric;
 const load = zigzero.load;
 const websocket = zigzero.websocket;
 const discovery = zigzero.discovery;
+const limiter = zigzero.limiter;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -35,6 +36,10 @@ pub fn main() !void {
     var shedder = try load.newAdaptiveShedder(allocator, .{});
     defer shedder.deinit();
 
+    // Create IP-based rate limiter
+    var ip_limiter = limiter.IpLimiter.init(allocator, 10.0, 5);
+    defer ip_limiter.deinit();
+
     // Create WebSocket hub
     var hub = websocket.Hub.init(allocator);
     defer hub.deinit();
@@ -58,6 +63,7 @@ pub fn main() !void {
     try server.addMiddleware(middleware.logging());
     try server.addMiddleware(middleware.observability(&registry));
     try server.addMiddleware(middleware.loadShedding(&shedder));
+    try server.addMiddleware(middleware.rateLimitByIp(&ip_limiter));
 
     // Health check endpoint
     try server.addRoute(.{
