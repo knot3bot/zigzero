@@ -45,14 +45,7 @@ pub const Upstream = struct {
 };
 
 /// Gateway route configuration
-pub const GatewayRoute = struct {
-    method: api.Method,
-    path: []const u8,
-    upstream: []const u8,
-    upstream_path: ?[]const u8 = null,
-    strip_prefix: ?[]const u8 = null,
-    middleware: []const api.MiddlewareFn = &.{},
-};
+pub const GatewayRoute = struct { method: api.Method, path: []const u8, upstream: []const u8, upstream_path: ?[]const u8 = null, strip_prefix: ?[]const u8 = null, middleware: []const api.Middleware = &.{} };
 
 /// Internal route configuration stored per registered route
 const RouteConfig = struct {

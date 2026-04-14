@@ -202,7 +202,8 @@ pub const Logger = struct {
             _ = stdout.write(formatted) catch return;
         }
 
-        if (self.file_logger) |*fl| {
+        const fl_ptr = @constCast(&self.file_logger);
+        if (fl_ptr.*) |*fl| {
             if (self.mode == .file or self.mode == .both) {
                 fl.write(formatted) catch return;
             }

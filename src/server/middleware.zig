@@ -56,7 +56,7 @@ fn verifyJwt(allocator: std.mem.Allocator, token: []const u8, secret: []const u8
     const sig_decoded = try base64UrlDecode(allocator, sig_b64);
     defer allocator.free(sig_decoded);
 
-    if (!std.crypto.utils.timingSafeEql([32]u8, expected_sig, sig_decoded[0..32].*)) {
+    if (!std.crypto.timing_safe.eql([32]u8, expected_sig, sig_decoded[0..32].*)) {
         return error.InvalidToken;
     }
 
@@ -66,59 +66,70 @@ fn verifyJwt(allocator: std.mem.Allocator, token: []const u8, secret: []const u8
     return std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
 }
 
+const JwtState = struct {
+    secret: []const u8,
+};
+
 /// JWT middleware for authentication
-pub fn jwt(secret: []const u8) api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            const auth_header = ctx.header("Authorization");
-            if (auth_header == null) {
-                try ctx.sendError(401, "missing authorization header");
-                return;
-            }
-            if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
-                try ctx.sendError(401, "invalid authorization format");
-                return;
-            }
-
-            const token = auth_header.?[7..];
-            if (token.len == 0) {
-                try ctx.sendError(401, "missing token");
-                return;
-            }
-
-            const parsed = verifyJwt(ctx.allocator, token, secret) catch |err| {
-                _ = err;
-                try ctx.sendError(401, "invalid or expired token");
-                return;
-            };
-            defer parsed.deinit();
-
-            // Optionally attach claims to context via header for downstream use
-            if (parsed.value.object.get("sub")) |sub| {
-                if (sub == .string) {
-                    try ctx.setHeader("X-User-ID", sub.string);
+pub fn jwt(allocator: std.mem.Allocator, secret: []const u8) !api.Middleware {
+    const state = try allocator.create(JwtState);
+    state.secret = try allocator.dupe(u8, secret);
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const s = @as(*JwtState, @ptrCast(@alignCast(data.?))).secret;
+                const auth_header = ctx.header("Authorization");
+                if (auth_header == null) {
+                    try ctx.sendError(401, "missing authorization header");
+                    return;
                 }
-            }
+                if (!std.mem.startsWith(u8, auth_header.?, "Bearer ")) {
+                    try ctx.sendError(401, "invalid authorization format");
+                    return;
+                }
 
-            try next(ctx);
-        }
-    }.middleware;
+                const token = auth_header.?[7..];
+                if (token.len == 0) {
+                    try ctx.sendError(401, "missing token");
+                    return;
+                }
+
+                const parsed = verifyJwt(ctx.allocator, token, s) catch {
+                    try ctx.sendError(401, "invalid or expired token");
+                    return;
+                };
+                defer parsed.deinit();
+
+                if (parsed.value.object.get("sub")) |sub| {
+                    if (sub == .string) {
+                        try ctx.setHeader("X-User-ID", sub.string);
+                    }
+                }
+
+                try next(ctx);
+            }
+        }.middleware,
+        .user_data = state,
+    };
 }
 
 /// Request ID middleware
-pub fn requestId() api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            const request_id = ctx.header("X-Request-ID") orelse blk: {
-                const timestamp = std.time.timestamp();
-                const random = std.crypto.random.int(u32);
-                const id = std.fmt.allocPrint(std.heap.page_allocator, "{d}-{x}", .{ timestamp, random }) catch "";
-                break :blk id;
-            };
-            try ctx.setHeader("X-Request-ID", request_id);
-            try next(ctx);
-        }
-    }.middleware;
+pub fn requestId() api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                _ = data;
+                const request_id = ctx.header("X-Request-ID") orelse blk: {
+                    const timestamp = std.time.timestamp();
+                    const random = std.crypto.random.int(u32);
+                    const id = std.fmt.allocPrint(std.heap.page_allocator, "{d}-{x}", .{ timestamp, random }) catch "";
+                    break :blk id;
+                };
+                try ctx.setHeader("X-Request-ID", request_id);
+                try next(ctx);
+            }
+        }.middleware,
+    };
 }
 
 /// CORS options
@@ -129,187 +140,203 @@ pub const CorsOptions = struct {
 };
 
 /// CORS middleware
-pub fn cors(options: CorsOptions) api.MiddlewareFn {
-    return struct {
-        const opts = options;
+pub fn cors(allocator: std.mem.Allocator, options: CorsOptions) !api.Middleware {
+    const opts = try allocator.create(CorsOptions);
+    opts.* = options;
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const o = @as(*CorsOptions, @ptrCast(@alignCast(data.?)));
+                try ctx.setHeader("Access-Control-Allow-Origin", o.allow_origins);
+                try ctx.setHeader("Access-Control-Allow-Methods", o.allow_methods);
+                try ctx.setHeader("Access-Control-Allow-Headers", o.allow_headers);
 
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            try ctx.setHeader("Access-Control-Allow-Origin", opts.allow_origins);
-            try ctx.setHeader("Access-Control-Allow-Methods", opts.allow_methods);
-            try ctx.setHeader("Access-Control-Allow-Headers", opts.allow_headers);
+                if (ctx.method == .OPTIONS) {
+                    ctx.status_code = 204;
+                    ctx.responded = true;
+                    return;
+                }
 
-            if (ctx.method == .OPTIONS) {
-                ctx.status_code = 204;
-                ctx.responded = true;
-                return;
+                try next(ctx);
             }
-
-            try next(ctx);
-        }
-    }.middleware;
+        }.middleware,
+        .user_data = opts,
+    };
 }
 
 /// Rate limiting middleware
-pub fn rateLimit(bucket: *limiter.TokenBucket) api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            if (!bucket.allow()) {
-                try ctx.sendError(429, "rate limit exceeded");
-                return;
+pub fn rateLimit(bucket: *limiter.TokenBucket) api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const b = @as(*limiter.TokenBucket, @ptrCast(@alignCast(data.?)));
+                if (!b.allow()) {
+                    try ctx.sendError(429, "rate limit exceeded");
+                    return;
+                }
+                try next(ctx);
             }
-            try next(ctx);
-        }
-    }.middleware;
+        }.middleware,
+        .user_data = bucket,
+    };
 }
 
 /// Logging middleware
-pub fn logging() api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            const start = std.time.milliTimestamp();
-            try next(ctx);
-            const duration = std.time.milliTimestamp() - start;
-            const msg = std.fmt.allocPrint(ctx.allocator, "{s} {s} - {d} ({d}ms)", .{
-                ctx.method.toString(),
-                ctx.raw_path,
-                ctx.status_code,
-                duration,
-            }) catch return;
-            defer ctx.allocator.free(msg);
-            ctx.logger.info(msg);
-        }
-    }.middleware;
+pub fn logging() api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                _ = data;
+                const start = std.time.milliTimestamp();
+                try next(ctx);
+                const duration = std.time.milliTimestamp() - start;
+                const msg = std.fmt.allocPrint(ctx.allocator, "{s} {s} - {d} ({d}ms)", .{
+                    ctx.method.toString(),
+                    ctx.raw_path,
+                    ctx.status_code,
+                    duration,
+                }) catch return;
+                defer ctx.allocator.free(msg);
+                ctx.logger.info(msg);
+            }
+        }.middleware,
+    };
 }
 
 /// Recovery middleware (panic handler)
-pub fn recovery() api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            if (@errorReturnTrace()) |_| {
-                ctx.sendError(500, "internal server error") catch {};
+pub fn recovery() api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                _ = data;
+                if (@errorReturnTrace()) |_| {
+                    ctx.sendError(500, "internal server error") catch {};
+                }
+                try next(ctx);
             }
-            try next(ctx);
-        }
-    }.middleware;
+        }.middleware,
+    };
 }
 
 /// Observability middleware - auto trace + metrics collection
-pub fn observability(registry: *metric.Registry) api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            const start = std.time.milliTimestamp();
+pub fn observability(registry: *metric.Registry) api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const reg = @as(*metric.Registry, @ptrCast(@alignCast(data.?)));
+                const start = std.time.milliTimestamp();
 
-            // Auto trace span
-            var tracer = trace.Tracer.init(ctx.allocator, ctx.logger.service_name) catch null;
-            defer if (tracer) |*t| t.deinit();
+                // Auto trace span
+                var tracer = trace.Tracer.init(ctx.allocator, ctx.logger.service_name) catch null;
+                defer if (tracer) |*t| t.deinit();
 
-            var span: ?*trace.Span = null;
-            if (tracer) |*t| {
-                span = t.startTrace("http-request") catch null;
+                var span: ?*trace.Span = null;
+                if (tracer) |*t| {
+                    span = t.startTrace("http-request") catch null;
+                    if (span) |s| {
+                        s.setAttribute("http.method", ctx.method.toString()) catch {};
+                        s.setAttribute("http.path", ctx.path) catch {};
+                    }
+                }
+
+                try next(ctx);
+
+                const duration = std.time.milliTimestamp() - start;
+
+                // Record metrics
+                const requests = reg.counter("http_requests_total", "Total HTTP requests") catch null;
+                if (requests) |r| r.inc();
+
+                const request_duration = reg.histogram("http_request_duration_ms", "HTTP request duration in milliseconds", &.{ 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000 }) catch null;
+                if (request_duration) |h| h.observe(@floatFromInt(duration));
+
+                // Finalize trace
                 if (span) |s| {
-                    s.setAttribute("http.method", ctx.method.toString()) catch {};
-                    s.setAttribute("http.path", ctx.path) catch {};
+                    s.setStatus(if (ctx.status_code >= 500) .err else .ok);
+                    s.end();
+                    var trace_buf: [64]u8 = undefined;
+                    const trace_id = s.formatTraceId(&trace_buf);
+                    ctx.setHeader("X-Trace-ID", trace_id) catch {};
                 }
             }
-
-            try next(ctx);
-
-            const duration = std.time.milliTimestamp() - start;
-
-            // Record metrics
-            const requests = registry.counter("http_requests_total", "Total HTTP requests") catch null;
-            if (requests) |r| r.inc();
-
-            const request_duration = registry.histogram("http_request_duration_ms", "HTTP request duration in milliseconds", &.{ 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000 }) catch null;
-            if (request_duration) |h| h.observe(@floatFromInt(duration)) catch {};
-
-            // Finalize trace
-            if (span) |s| {
-                s.setStatus(if (ctx.status_code >= 500) .err else .ok);
-                s.end();
-                var trace_buf: [64]u8 = undefined;
-                const trace_id = s.formatTraceId(&trace_buf);
-                ctx.setHeader("X-Trace-ID", trace_id) catch {};
-            }
-        }
-    }.middleware;
+        }.middleware,
+        .user_data = registry,
+    };
 }
 
-/// Prometheus metrics handler
-pub fn prometheusHandler(registry: *metric.Registry) api.HandlerFn {
-    return struct {
-        fn handle(ctx: *api.Context) !void {
-            var buf = std.ArrayList(u8){};
-            defer buf.deinit(ctx.allocator);
-            try registry.exportPrometheus(buf.writer(ctx.allocator));
-            try ctx.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-            try ctx.response_body.appendSlice(ctx.allocator, buf.items);
-            ctx.responded = true;
-        }
-    }.handle;
+/// Prometheus metrics handler (expects registry in ctx.user_data)
+pub fn prometheusHandler(ctx: *api.Context) !void {
+    const registry = @as(*metric.Registry, @ptrCast(@alignCast(ctx.user_data.?)));
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(ctx.allocator);
+    try registry.exportPrometheus(buf.writer(ctx.allocator));
+    try ctx.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    try ctx.response_body.appendSlice(ctx.allocator, buf.items);
+    ctx.responded = true;
 }
 
 /// Load shedding middleware using adaptive shedder
-pub fn loadShedding(shedder: *load.AdaptiveShedder) api.MiddlewareFn {
-    return struct {
-        fn middleware(ctx: *api.Context, next: api.HandlerFn) anyerror!void {
-            const promise = shedder.allow() catch {
-                try ctx.sendError(503, "service overloaded");
-                return;
-            };
-            next(ctx) catch |err| {
-                promise.fail();
-                return err;
-            };
-            promise.pass();
-        }
-    }.middleware;
+pub fn loadShedding(shedder: *load.AdaptiveShedder) api.Middleware {
+    return .{
+        .func = struct {
+            fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
+                const s = @as(*load.AdaptiveShedder, @ptrCast(@alignCast(data.?)));
+                const promise = s.allow() catch {
+                    try ctx.sendError(503, "service overloaded");
+                    return;
+                };
+                next(ctx) catch |err| {
+                    promise.fail();
+                    return err;
+                };
+                promise.pass();
+            }
+        }.middleware,
+        .user_data = shedder,
+    };
 }
 
-/// Health check handler
-pub fn healthHandler(registry: *health.Registry) api.HandlerFn {
-    return struct {
-        fn handle(ctx: *api.Context) !void {
-            var results = try registry.checkAll();
-            defer results.deinit();
+/// Health check handler (expects registry in ctx.user_data)
+pub fn healthHandler(ctx: *api.Context) !void {
+    const registry = @as(*health.Registry, @ptrCast(@alignCast(ctx.user_data.?)));
+    var results = try registry.checkAll();
+    defer results.deinit();
 
-            var buf = std.ArrayList(u8){};
-            defer buf.deinit(ctx.allocator);
-            const w = buf.writer(ctx.allocator);
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(ctx.allocator);
+    const w = buf.writer(ctx.allocator);
 
-            try w.writeAll("{\"status\":\"");
-            const overall = try registry.overall();
-            const status_str = switch (overall) {
-                .healthy => "healthy",
-                .degraded => "degraded",
-                .unhealthy => "unhealthy",
-            };
-            try w.writeAll(status_str);
-            try w.writeAll("\",\"checks\":{");
+    try w.writeAll("{\"status\":\"");
+    const overall = try registry.overall();
+    const status_str = switch (overall) {
+        .healthy => "healthy",
+        .degraded => "degraded",
+        .unhealthy => "unhealthy",
+    };
+    try w.writeAll(status_str);
+    try w.writeAll("\",\"checks\":{");
 
-            var first = true;
-            var iter = results.iterator();
-            while (iter.next()) |entry| {
-                if (!first) try w.writeAll(",");
-                first = false;
-                const r = entry.value_ptr.*;
-                const check_status = switch (r.status) {
-                    .healthy => "healthy",
-                    .degraded => "degraded",
-                    .unhealthy => "unhealthy",
-                };
-                if (r.message) |msg| {
-                    try w.print("\"{s}\":{{\"status\":\"{s}\",\"message\":\"{s}\"}}", .{ r.name, check_status, msg });
-                } else {
-                    try w.print("\"{s}\":{{\"status\":\"{s}\"}}", .{ r.name, check_status });
-                }
-            }
-            try w.writeAll("}}");
-
-            const code: u16 = if (overall == .unhealthy) 503 else 200;
-            try ctx.json(code, buf.items);
+    var first = true;
+    var iter = results.iterator();
+    while (iter.next()) |entry| {
+        if (!first) try w.writeAll(",");
+        first = false;
+        const r = entry.value_ptr.*;
+        const check_status = switch (r.status) {
+            .healthy => "healthy",
+            .degraded => "degraded",
+            .unhealthy => "unhealthy",
+        };
+        if (r.message) |msg| {
+            try w.print("\"{s}\":{{\"status\":\"{s}\",\"message\":\"{s}\"}}", .{ r.name, check_status, msg });
+        } else {
+            try w.print("\"{s}\":{{\"status\":\"{s}\"}}", .{ r.name, check_status });
         }
-    }.handle;
+    }
+    try w.writeAll("}}");
+
+    const code: u16 = if (overall == .unhealthy) 503 else 200;
+    try ctx.json(code, buf.items);
 }
 
 test "middleware" {

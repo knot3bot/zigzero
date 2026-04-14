@@ -45,15 +45,21 @@ pub const Method = enum {
 /// HTTP handler function type
 pub const HandlerFn = *const fn (*Context) anyerror!void;
 
-/// Middleware function type
-pub const MiddlewareFn = *const fn (*Context, HandlerFn) anyerror!void;
+/// Middleware function type with optional user data
+pub const MiddlewareFn = *const fn (*Context, HandlerFn, ?*anyopaque) anyerror!void;
+
+/// Middleware wrapper with optional state
+pub const Middleware = struct {
+    func: MiddlewareFn,
+    user_data: ?*anyopaque = null,
+};
 
 /// Route definition
 pub const Route = struct {
     method: Method,
     path: []const u8,
     handler: HandlerFn,
-    middleware: []const MiddlewareFn = &.{},
+    middleware: []const Middleware = &.{},
     user_data: ?*anyopaque = null,
 };
 
@@ -84,9 +90,8 @@ pub const Context = struct {
     user_data: ?*anyopaque = null,
     trace_context: ?trace.TraceContext = null,
 
-    // Middleware chain fields (use fully expanded type to avoid dependency loop)
-    chain_middlewares: []const *const fn (*Context, *const fn (*Context) anyerror!void) anyerror!void = &.{},
-
+    // Middleware chain fields
+    chain_middlewares: []const Middleware = &.{},
     chain_handler: *const fn (*Context) anyerror!void = undefined,
     chain_index: usize = 0,
 
@@ -294,6 +299,56 @@ fn parseFormBody(allocator: std.mem.Allocator, body: []const u8) !std.StringHash
     return form;
 }
 
+/// Simple stream reader wrapper for HTTP parsing
+const StreamReader = struct {
+    stream: std.net.Stream,
+    buf: [8192]u8 = undefined,
+    pos: usize = 0,
+    end: usize = 0,
+
+    fn readByte(self: *StreamReader) !?u8 {
+        if (self.pos >= self.end) {
+            const n = try self.stream.read(&self.buf);
+            if (n == 0) return null;
+            self.pos = 0;
+            self.end = n;
+        }
+        const b = self.buf[self.pos];
+        self.pos += 1;
+        return b;
+    }
+
+    fn readUntilDelimiterOrEof(self: *StreamReader, out: []u8, delimiter: u8) !?[]u8 {
+        var i: usize = 0;
+        while (i < out.len) {
+            const b = try self.readByte() orelse return if (i == 0) null else out[0..i];
+            out[i] = b;
+            i += 1;
+            if (b == delimiter) return out[0..i];
+        }
+        return out[0..i];
+    }
+
+    fn readAll(self: *StreamReader, out: []u8) !usize {
+        var total: usize = 0;
+        while (total < out.len) {
+            // First, drain any buffered bytes
+            if (self.pos < self.end) {
+                const avail = self.end - self.pos;
+                const to_copy = @min(avail, out.len - total);
+                @memcpy(out[total..][0..to_copy], self.buf[self.pos..][0..to_copy]);
+                self.pos += to_copy;
+                total += to_copy;
+                continue;
+            }
+            const n = try self.stream.read(out[total..]);
+            if (n == 0) break;
+            total += n;
+        }
+        return total;
+    }
+};
+
 /// HTTP request parser
 const RequestParser = struct {
     allocator: std.mem.Allocator,
@@ -302,7 +357,7 @@ const RequestParser = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn parse(self: *RequestParser, reader: std.io.AnyReader, max_body_size: usize) !ParsedRequest {
+    pub fn parse(self: *RequestParser, reader: *StreamReader, max_body_size: usize) !ParsedRequest {
         var buffer: [8192]u8 = undefined;
 
         // Read request line
@@ -571,45 +626,49 @@ const MatchedRoute = struct {
     params: std.StringHashMap([]const u8),
 };
 
+fn getStatusText(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        else => "Unknown",
+    };
+}
+
 /// HTTP response writer
 const ResponseWriter = struct {
-    pub fn write(writer: std.io.AnyWriter, status: u16, headers: *const std.StringHashMap([]const u8), body: []const u8) !void {
+    pub fn write(allocator: std.mem.Allocator, stream: std.net.Stream, status: u16, headers: *const std.StringHashMap([]const u8), body: []const u8) !void {
+        var buf = std.ArrayList(u8){};
+        defer buf.deinit(allocator);
+        const w = buf.writer(allocator);
+
         const status_text = getStatusText(status);
-        try writer.print("HTTP/1.1 {d} {s}\r\n", .{ status, status_text });
+        try w.print("HTTP/1.1 {d} {s}\r\n", .{ status, status_text });
 
         var iter = headers.iterator();
         while (iter.next()) |entry| {
-            try writer.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try w.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
 
-        try writer.print("Content-Length: {d}\r\n", .{body.len});
-        try writer.writeAll("\r\n");
-        try writer.writeAll(body);
-    }
+        try w.print("Content-Length: {d}\r\n", .{body.len});
+        try w.writeAll("\r\n");
+        try w.writeAll(body);
 
-    fn getStatusText(status: u16) []const u8 {
-        return switch (status) {
-            200 => "OK",
-            201 => "Created",
-            204 => "No Content",
-            400 => "Bad Request",
-            401 => "Unauthorized",
-            403 => "Forbidden",
-            404 => "Not Found",
-            405 => "Method Not Allowed",
-            429 => "Too Many Requests",
-            500 => "Internal Server Error",
-            502 => "Bad Gateway",
-            503 => "Service Unavailable",
-            else => "Unknown",
-        };
+        _ = try stream.write(buf.items);
     }
 };
 
 /// Route group for organizing routes with common prefix and middleware
 pub const RouteGroup = struct {
     prefix: []const u8,
-    middleware: []const MiddlewareFn,
+    middleware: []const Middleware,
     server: *Server,
 
     pub fn init(server: *Server, prefix: []const u8) RouteGroup {
@@ -620,7 +679,7 @@ pub const RouteGroup = struct {
         };
     }
 
-    pub fn withMiddleware(self: RouteGroup, mws: []const MiddlewareFn) RouteGroup {
+    pub fn withMiddleware(self: RouteGroup, mws: []const Middleware) RouteGroup {
         var group = self;
         group.middleware = mws;
         return group;
@@ -665,7 +724,7 @@ pub const RouteGroup = struct {
         defer self.server.allocator.free(fp);
 
         // Combine group middleware + any empty per-route middleware
-        const mws = try self.server.allocator.alloc(MiddlewareFn, self.middleware.len);
+        const mws = try self.server.allocator.alloc(Middleware, self.middleware.len);
         errdefer self.server.allocator.free(mws);
         @memcpy(mws, self.middleware);
 
@@ -683,7 +742,7 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     port: u16,
     router: Router,
-    global_middleware: std.ArrayList(MiddlewareFn),
+    global_middleware: std.ArrayList(Middleware),
     name: []const u8,
     running: std.atomic.Value(bool),
     server_socket: ?std.net.Server = null,
@@ -696,7 +755,7 @@ pub const Server = struct {
             .allocator = allocator,
             .port = port,
             .router = Router.init(allocator),
-            .global_middleware = std.ArrayList(MiddlewareFn){},
+            .global_middleware = std.ArrayList(Middleware){},
             .name = "zigzero-api",
             .running = std.atomic.Value(bool).init(false),
             .server_socket = null,
@@ -725,7 +784,7 @@ pub const Server = struct {
     }
 
     /// Add global middleware
-    pub fn addMiddleware(self: *Server, mw: MiddlewareFn) !void {
+    pub fn addMiddleware(self: *Server, mw: Middleware) !void {
         try self.global_middleware.append(self.allocator, mw);
     }
 
@@ -786,17 +845,18 @@ pub const Server = struct {
         defer arena.deinit();
         const arena_alloc = arena.allocator();
 
-        const reader = conn.stream.reader();
-        const writer = conn.stream.writer();
+        var stream_reader = StreamReader{ .stream = conn.stream };
 
         const start_time = std.time.milliTimestamp();
 
         var parser = RequestParser.init(arena_alloc);
-        var request = parser.parse(reader.any(), self.max_body_size) catch |err| {
-            self.logger.err(try std.fmt.allocPrint(arena_alloc, "Parse error: {any}", .{err}));
+        var request = parser.parse(&stream_reader, self.max_body_size) catch |err| {
+            const err_msg = std.fmt.allocPrint(arena_alloc, "Parse error: {any}", .{err}) catch "Parse error";
+            self.logger.err(err_msg);
             const status: u16 = if (err == error.BodyTooLarge) 413 else 400;
             const msg = if (err == error.BodyTooLarge) "Payload Too Large" else "Bad Request";
-            _ = writer.print("HTTP/1.1 {d} {s}\r\n\r\n", .{ status, msg }) catch {};
+            const response = std.fmt.allocPrint(arena_alloc, "HTTP/1.1 {d} {s}\r\n\r\n", .{ status, msg }) catch return;
+            _ = conn.stream.write(response) catch {};
             return;
         };
         defer request.deinit(arena_alloc);
@@ -868,17 +928,18 @@ pub const Server = struct {
         // Check request timeout
         const elapsed = std.time.milliTimestamp() - start_time;
         if (elapsed > self.request_timeout_ms) {
-            self.logger.warn(try std.fmt.allocPrint(arena_alloc, "Request timeout: {s} {s} took {d}ms", .{ request.method.toString(), request.path, elapsed }));
+            const timeout_msg = std.fmt.allocPrint(arena_alloc, "Request timeout: {s} {s} took {d}ms", .{ request.method.toString(), request.path, elapsed }) catch "Request timeout";
+            self.logger.warn(timeout_msg);
         }
 
         // Send response
-        ResponseWriter.write(writer.any(), ctx.status_code, &ctx.response_headers, ctx.response_body.items) catch {};
+        ResponseWriter.write(arena_alloc, conn.stream, ctx.status_code, &ctx.response_headers, ctx.response_body.items) catch {};
     }
 
-    fn executeWithMiddleware(self: *Server, ctx: *Context, final_handler: HandlerFn, route_middleware: []const MiddlewareFn) !void {
+    fn executeWithMiddleware(self: *Server, ctx: *Context, final_handler: HandlerFn, route_middleware: []const Middleware) !void {
         // Build combined middleware list: global + route-specific
         const total_mw = self.global_middleware.items.len + route_middleware.len;
-        const combined = try self.allocator.alloc(MiddlewareFn, total_mw);
+        const combined = try self.allocator.alloc(Middleware, total_mw);
         defer self.allocator.free(combined);
 
         @memcpy(combined[0..self.global_middleware.items.len], self.global_middleware.items);
@@ -896,7 +957,7 @@ fn runMiddlewareChain(ctx: *Context) anyerror!void {
     if (ctx.chain_index < ctx.chain_middlewares.len) {
         const mw = ctx.chain_middlewares[ctx.chain_index];
         ctx.chain_index += 1;
-        try mw(ctx, runMiddlewareChain);
+        try mw.func(ctx, runMiddlewareChain, mw.user_data);
     } else {
         try ctx.chain_handler(ctx);
     }
