@@ -152,6 +152,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(api_server);
 
+    // chy3 — Creator Metaverse Platform example
+    const chy3_module = b.createModule(.{
+        .root_source_file = b.path("examples/chy3/chy3.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    chy3_module.addImport("zigzero", zigzero_mod);
+    const chy3 = b.addExecutable(.{
+        .name = "chy3",
+        .root_module = chy3_module,
+    });
+    b.installArtifact(chy3);
+
+    const chy3_step = b.step("chy3", "Build the chy3 example");
+    chy3_step.dependOn(&chy3.step);
+
     const test_step = b.step("test", "Run unit tests");
 
     const test_module = b.createModule(.{

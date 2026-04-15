@@ -134,7 +134,7 @@ pub const Queue = struct {
     fn dispatchLoop(self: *Queue) void {
         while (self.running.load(.monotonic)) {
             self.dispatchPending();
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
     }
 

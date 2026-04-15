@@ -112,6 +112,6 @@ test "cache ttl" {
     try cache.set(1, "hello", 1);
     try std.testing.expectEqualStrings("hello", cache.get(1).?);
 
-    std.time.sleep(2 * std.time.ns_per_ms);
+    std.Thread.sleep(2 * std.time.ns_per_ms);
     try std.testing.expect(cache.get(1) == null);
 }

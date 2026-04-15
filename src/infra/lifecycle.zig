@@ -48,7 +48,7 @@ pub const Manager = struct {
         // Note: In a real implementation, we'd use std.os.sigaction
         // For cross-platform compatibility, this is a simplified version
         while (self.running.load(.monotonic)) {
-            std.time.sleep(100 * std.time.ns_per_ms);
+            std.Thread.sleep(100 * std.time.ns_per_ms);
         }
         self.executeShutdown();
     }
@@ -80,7 +80,7 @@ pub const Manager = struct {
     pub fn wait(self: *Manager, interval_ms: u64) void {
         const end = std.time.milliTimestamp() + @as(i64, @intCast(interval_ms));
         while (self.running.load(.monotonic) and std.time.milliTimestamp() < end) {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
     }
 };

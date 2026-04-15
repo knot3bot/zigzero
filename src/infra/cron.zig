@@ -89,7 +89,7 @@ pub const Scheduler = struct {
                     job.last_run = now;
                 }
             }
-            std.time.sleep(1 * std.time.ns_per_s);
+            std.Thread.sleep(1 * std.time.ns_per_s);
         }
     }
 };
@@ -103,7 +103,7 @@ pub fn every(seconds: u64, task: *const fn (*anyopaque) void, context: *anyopaqu
             task(context);
             break;
         }
-        std.time.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 }
 
