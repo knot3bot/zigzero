@@ -21,12 +21,19 @@ pub const Value = union(enum) {
 
 /// Row of query results
 pub const Row = struct {
+    allocator: std.mem.Allocator,
     columns: []const []const u8,
     values: []const ?Value,
 
     pub fn get(self: Row, column: []const u8) ?Value {
         for (self.columns, 0..) |col, i| {
-            if (std.mem.eql(u8, col, column)) return self.values[i];
+            if (std.mem.eql(u8, col, column)) {
+                const v = self.values[i] orelse return null;
+                switch (v) {
+                    .string => |s| return .{ .string = self.allocator.dupe(u8, s) catch return null },
+                    else => return v,
+                }
+            }
         }
         return null;
     }
@@ -135,11 +142,50 @@ fn scanStruct(allocator: std.mem.Allocator, comptime T: type, row: Row, partial:
 
     var result: T = undefined;
     inline for (info.@"struct".fields) |field| {
-        const val = row.get(field.name);
         const FieldType = field.type;
+        const is_optional = @typeInfo(FieldType) == .optional;
+        const BaseType = if (is_optional) @typeInfo(FieldType).optional.child else FieldType;
+        const is_string = BaseType == []const u8;
 
-        if (@typeInfo(FieldType) == .optional) {
-            const ChildType = @typeInfo(FieldType).optional.child;
+        if (is_string) {
+            // String fields: bypass row.get() to avoid double-duplication.
+            // row.get() duplicates the string; valueToType would duplicate again.
+            found: {
+                for (row.columns, 0..) |col, ci| {
+                    if (std.mem.eql(u8, col, field.name)) {
+                        const raw_val = row.values[ci];
+                        if (raw_val == null or raw_val.? == .null) {
+                            if (is_optional) {
+                                @field(result, field.name) = null;
+                            } else if (partial) {
+                                @field(result, field.name) = &[_]u8{};
+                            } else {
+                                return error.NotFound;
+                            }
+                        } else {
+                            // raw_val.? is .string. Dupe it once (owned); freeScanned frees it.
+                            const str = raw_val.?.string;
+                            @field(result, field.name) = allocator.dupe(u8, str) catch return error.DatabaseError;
+                        }
+                        break :found;
+                    }
+                }
+                // Column not found
+                if (is_optional) {
+                    @field(result, field.name) = null;
+                } else if (partial) {
+                    @field(result, field.name) = &[_]u8{};
+                } else {
+                    return error.NotFound;
+                }
+            }
+            continue;
+        }
+
+        // Non-string fields: use row.get() as before (no duplication concern)
+        const val = row.get(field.name);
+        if (is_optional) {
+            const ChildType = BaseType;
             if (val == null or val.? == .null) {
                 @field(result, field.name) = null;
             } else {
@@ -253,7 +299,7 @@ pub const SQLiteConn = struct {
                 columns[i] = self.allocator.dupe(u8, name) catch return error.DatabaseError;
                 values[i] = readSQLiteValue(self.allocator, stmt, @intCast(i));
             }
-            rows_list.append(self.allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(self.allocator, .{ .allocator = self.allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
 
         const rows_slice = self.allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
@@ -375,10 +421,47 @@ pub const PostgresConn = struct {
     conn: ?*libpq_c.PGconn,
     allocator: std.mem.Allocator,
 
+    /// Connect using explicit parameters via dlsym (bypasses Zig C ABI issues)
+    pub fn connectParams(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, pass: []const u8, db: []const u8) !PostgresConn {
+        const host_c = try allocator.dupeZ(u8, host);
+        defer allocator.free(host_c);
+        const port_str_buf = try allocator.alloc(u8, 8);
+        const port_str = try std.fmt.bufPrintZ(port_str_buf, "{d}", .{port});
+        defer allocator.free(port_str_buf);
+        const user_c = try allocator.dupeZ(u8, user);
+        defer allocator.free(user_c);
+        const pass_c = try allocator.dupeZ(u8, pass);
+        defer allocator.free(pass_c);
+        const db_c = try allocator.dupeZ(u8, db);
+        defer allocator.free(db_c);
+
+        const empty_opt = "\x00";
+        const conn = libpq_c.PQsetdbLogin(
+            host_c,
+            port_str,
+            empty_opt,
+            empty_opt,
+            db_c,
+            user_c,
+            pass_c,
+        );
+        if (conn == null) return error.DatabaseError;
+        if (libpq_c.PQstatus(conn) != libpq_c.ConnStatusType.CONNECTION_OK) {
+            libpq_c.PQfinish(conn);
+            return error.DatabaseError;
+        }
+        return .{ .conn = conn, .allocator = allocator };
+    }
+
+    /// Null-terminated string connect
     pub fn connect(allocator: std.mem.Allocator, conninfo: []const u8) !PostgresConn {
-        const conn = libpq_c.PQconnectdb(@ptrCast(conninfo.ptr));
-        if (conn == null or libpq_c.PQstatus(conn) != libpq_c.ConnStatusType.CONNECTION_OK) {
-            if (conn) |c| libpq_c.PQfinish(c);
+        const null_terminated = try allocator.dupeZ(u8, conninfo);
+        defer allocator.free(null_terminated);
+        const conn = libpq_c.PQconnectdb(null_terminated);
+        if (conn == null) return error.DatabaseError;
+        const status = libpq_c.PQstatus(conn);
+        if (status != .CONNECTION_OK) {
+            libpq_c.PQfinish(conn);
             return error.DatabaseError;
         }
         return .{ .conn = conn, .allocator = allocator };
@@ -430,7 +513,7 @@ pub const PostgresConn = struct {
                     values[c] = .{ .string = allocator.dupe(u8, val) catch return error.DatabaseError };
                 }
             }
-            rows_list.append(allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(allocator, .{ .allocator = allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
 
         const rows_slice = allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
@@ -455,30 +538,46 @@ pub const PostgresConn = struct {
     fn execParams(self: *PostgresConn, sql_str: []const u8, args: []const Value) ?*libpq_c.PGresult {
         if (self.conn == null) return null;
         const paramValues = self.allocator.alloc(?[*]const u8, args.len) catch return null;
-        // Note: int/float string dupes may leak in this simplified implementation.
+        const paramLengths = self.allocator.alloc(c_int, args.len) catch {
+            self.allocator.free(paramValues);
+            return null;
+        };
+        // Note: allocated strings (int/float) may leak in this simplified implementation.
         for (args, 0..) |arg, i| {
             paramValues[i] = switch (arg) {
                 .null => null,
                 .int => |v| blk: {
                     const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch {
                         self.allocator.free(paramValues);
+                        self.allocator.free(paramLengths);
                         return null;
                     };
+                    paramLengths[i] = @intCast(s.len);
                     break :blk @ptrCast(s.ptr);
                 },
                 .float => |v| blk: {
                     const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch {
                         self.allocator.free(paramValues);
+                        self.allocator.free(paramLengths);
                         return null;
                     };
+                    paramLengths[i] = @intCast(s.len);
                     break :blk @ptrCast(s.ptr);
                 },
-                .string => |v| @ptrCast(v.ptr),
-                .bool => |v| if (v) @ptrCast("t") else @ptrCast("f"),
+                .string => |v| blk: {
+                    // Strings may not be null-terminated, so we provide paramLengths.
+                    paramLengths[i] = @intCast(v.len);
+                    break :blk @ptrCast(v.ptr);
+                },
+                .bool => |v| blk: {
+                    paramLengths[i] = 1;
+                    break :blk if (v) @ptrCast("t") else @ptrCast("f");
+                },
             };
         }
-        const res = libpq_c.PQexecParams(self.conn, @ptrCast(sql_str.ptr), @intCast(args.len), null, @ptrCast(paramValues.ptr), null, null, 0);
+        const res = libpq_c.PQexecParams(self.conn, @ptrCast(sql_str.ptr), @intCast(args.len), null, @ptrCast(paramValues.ptr), @ptrCast(paramLengths.ptr), null, 0);
         self.allocator.free(paramValues);
+        self.allocator.free(paramLengths);
         return res;
     }
 
@@ -578,7 +677,14 @@ pub const MySqlConn = struct {
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, user: []const u8, password: []const u8, db: []const u8, port: u32) !MySqlConn {
         const mysql = libmysql_c.mysql_init(null);
         if (mysql == null) return error.DatabaseError;
-        const conn = libmysql_c.mysql_real_connect(mysql, @ptrCast(host.ptr), @ptrCast(user.ptr), @ptrCast(password.ptr), @ptrCast(db.ptr), @intCast(port), null, 0);
+        // "" has ptr=null; mysql_real_connect interprets null as "no password".
+        // Use "\x00" (null terminator only) as a null-terminated empty string instead.
+        const password_cstr: [*c]const u8 = if (password.len > 0) @ptrCast(password.ptr) else @ptrCast("\x00");
+        // Use Unix socket for localhost connections (avoids TCP auth issues with
+        // caching_sha2_password which MariaDB Connector/C doesn't support with MySQL 8).
+        const use_socket = std.mem.eql(u8, host, "localhost") or std.mem.eql(u8, host, "127.0.0.1");
+        const socket_path: [*c]const u8 = if (use_socket) @ptrCast("/tmp/mysql.sock") else @ptrCast("\x00");
+        const conn = libmysql_c.mysql_real_connect(mysql, @ptrCast(host.ptr), @ptrCast(user.ptr), password_cstr, @ptrCast(db.ptr), @intCast(port), socket_path, 0);
         if (conn == null) {
             libmysql_c.mysql_close(mysql);
             return error.DatabaseError;
@@ -648,7 +754,7 @@ pub const MySqlConn = struct {
                     values[c] = .{ .string = allocator.dupe(u8, val) catch return error.DatabaseError };
                 }
             }
-            rows_list.append(allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(allocator, .{ .allocator = allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
 
         const rows_slice = allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
@@ -663,8 +769,9 @@ pub const MySqlConn = struct {
         defer self.allocator.free(query);
 
         if (libmysql_c.mysql_real_query(self.mysql, @ptrCast(query.ptr), @intCast(query.len)) != 0) return error.DatabaseError;
-        _ = libmysql_c.mysql_store_result(self.mysql);
-        libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
+        // mysql_store_result returns NULL for DDL/DML (no result set). Only free if non-null.
+        const res = libmysql_c.mysql_store_result(self.mysql);
+        if (res != null) libmysql_c.mysql_free_result(res);
 
         return ExecResult{
             .rows_affected = libmysql_c.mysql_affected_rows(self.mysql),
@@ -689,22 +796,22 @@ pub const MySqlConn = struct {
     fn beginFn(ptr: *anyopaque) errors.Result {
         const self = @as(*MySqlConn, @ptrCast(@alignCast(ptr)));
         if (libmysql_c.mysql_real_query(self.mysql, "START TRANSACTION", 17) != 0) return error.DatabaseError;
-        _ = libmysql_c.mysql_store_result(self.mysql);
-        libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
+        const res = libmysql_c.mysql_store_result(self.mysql);
+        if (res != null) libmysql_c.mysql_free_result(res);
     }
 
     fn commitFn(ptr: *anyopaque) errors.Result {
         const self = @as(*MySqlConn, @ptrCast(@alignCast(ptr)));
         if (libmysql_c.mysql_real_query(self.mysql, "COMMIT", 6) != 0) return error.DatabaseError;
-        _ = libmysql_c.mysql_store_result(self.mysql);
-        libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
+        const res = libmysql_c.mysql_store_result(self.mysql);
+        if (res != null) libmysql_c.mysql_free_result(res);
     }
 
     fn rollbackFn(ptr: *anyopaque) errors.Result {
         const self = @as(*MySqlConn, @ptrCast(@alignCast(ptr)));
         if (libmysql_c.mysql_real_query(self.mysql, "ROLLBACK", 8) != 0) return error.DatabaseError;
-        _ = libmysql_c.mysql_store_result(self.mysql);
-        libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
+        const res = libmysql_c.mysql_store_result(self.mysql);
+        if (res != null) libmysql_c.mysql_free_result(res);
     }
 
     fn prepareFn(ptr: *anyopaque, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt) {
@@ -808,7 +915,7 @@ pub const SQLiteStmt = struct {
                 columns[i] = allocator.dupe(u8, name) catch return error.DatabaseError;
                 values[i] = readSQLiteValue(allocator, self.stmt, @intCast(i));
             }
-            rows_list.append(allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(allocator, .{ .allocator = allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
 
         const rows_slice = allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
@@ -936,7 +1043,7 @@ pub const PostgresStmt = struct {
                     values[c] = .{ .string = allocator.dupe(u8, val) catch return error.DatabaseError };
                 }
             }
-            rows_list.append(allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(allocator, .{ .allocator = allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
         const rows_slice = allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
         @memcpy(rows_slice, rows_list.items);
@@ -1046,7 +1153,7 @@ pub const MySqlStmt = struct {
                     values[c] = .{ .string = allocator.dupe(u8, val) catch return error.DatabaseError };
                 }
             }
-            rows_list.append(allocator, .{ .columns = columns, .values = values }) catch return error.DatabaseError;
+            rows_list.append(allocator, .{ .allocator = allocator, .columns = columns, .values = values }) catch return error.DatabaseError;
         }
         const rows_slice = allocator.alloc(Row, rows_list.items.len) catch return error.DatabaseError;
         @memcpy(rows_slice, rows_list.items);
@@ -1059,8 +1166,8 @@ pub const MySqlStmt = struct {
         const query = formatQuery(self.allocator, self.sql, args) catch return error.DatabaseError;
         defer self.allocator.free(query);
         if (libmysql_c.mysql_real_query(self.mysql, @ptrCast(query.ptr), @intCast(query.len)) != 0) return error.DatabaseError;
-        _ = libmysql_c.mysql_store_result(self.mysql);
-        libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
+        const res = libmysql_c.mysql_store_result(self.mysql);
+        if (res != null) libmysql_c.mysql_free_result(res);
         return ExecResult{
             .rows_affected = libmysql_c.mysql_affected_rows(self.mysql),
             .last_insert_id = @intCast(libmysql_c.mysql_insert_id(self.mysql)),
@@ -1379,20 +1486,20 @@ pub const Client = struct {
                 return sqlite.toConn();
             },
             .postgres => {
-                const info = if (self.config.postgres_conninfo.len > 0)
-                    self.config.postgres_conninfo
-                else
-                    try std.fmt.allocPrint(self.allocator, "host={s} port={d} dbname={s} user={s} password={s}", .{
+                const pg: *PostgresConn = try self.allocator.create(PostgresConn);
+                errdefer self.allocator.destroy(pg);
+                if (self.config.postgres_conninfo.len > 0) {
+                    pg.* = try PostgresConn.connect(self.allocator, self.config.postgres_conninfo);
+                } else {
+                    pg.* = try PostgresConn.connectParams(
+                        self.allocator,
                         self.config.host,
                         self.config.port,
-                        self.config.database,
                         self.config.username,
                         self.config.password,
-                    });
-                defer if (self.config.postgres_conninfo.len == 0) self.allocator.free(info);
-                const pg = try self.allocator.create(PostgresConn);
-                errdefer self.allocator.destroy(pg);
-                pg.* = try PostgresConn.connect(self.allocator, info);
+                        self.config.database,
+                    );
+                }
                 return pg.toConn();
             },
             .mysql => {
@@ -1538,7 +1645,7 @@ pub const Client = struct {
         return self.ping();
     }
 
-    pub fn beginTx(self: *Client) !Transaction {
+    pub fn beginTx(self: *Client) errors.Error!Transaction {
         self.ensureBreaker();
         if (!self.cb.?.allow()) return errors.Error.CircuitBreakerOpen;
         self.ensurePool();
@@ -1556,7 +1663,12 @@ pub const Client = struct {
             };
             return Transaction{ .conn = conn, .pool = p };
         }
-        if (self.conn == null) try self.connect();
+        if (self.conn == null) {
+            self.connect() catch |err| {
+                if (err == error.OutOfMemory) return errors.Error.OutOfMemory;
+                return errors.Error.DatabaseError;
+            };
+        }
         self.conn.?.begin() catch {
             if (!self.isAcceptable(errors.DatabaseError.ConnectionFailed)) self.cb.?.recordFailure();
             return errors.Error.DatabaseError;
@@ -2287,6 +2399,23 @@ pub const Builder = struct {
 
 // ==================== Tests ====================
 
+/// Skip this test unless the DB env var matches.
+/// Postgres tests (named "postgres"): skip if DB=mysql or DB=sqlite
+/// MySQL tests (named "mysql"): skip if DB=postgres or DB=sqlite
+/// All other tests: always run (DB env doesn't affect them)
+/// In CI: postgres job sets DB=postgres, mysql job sets DB=mysql,
+/// sqlite job leaves DB unset so all tests run.
+fn skipUnlessDb(comptime db: []const u8) !void {
+    const db_env = std.process.getEnvVarOwned(std.heap.page_allocator, "DB") catch {
+        // DB env var not set: skip this DB-specific test (don't run it).
+        return error.SkipZigTest;
+    };
+    defer std.heap.page_allocator.free(db_env);
+    if (!std.mem.eql(u8, db_env, db)) {
+        return error.SkipZigTest;
+    }
+}
+
 test "cached conn queryRow and exec" {
     const allocator = std.testing.allocator;
     var client = Client.init(allocator, .{ .driver = .sqlite, .sqlite_path = ":memory:" });
@@ -2451,7 +2580,10 @@ test "sqlite in-memory query and exec" {
 
     try std.testing.expectEqual(@as(usize, 1), rows.rows.len);
     try std.testing.expectEqual(@as(i64, 1), rows.rows[0].get("id").?.int);
-    try std.testing.expectEqualStrings("Alice", rows.rows[0].get("name").?.string);
+    if (rows.rows[0].get("name")) |name_val| {
+        try std.testing.expectEqualStrings("Alice", name_val.string);
+        rows.allocator.free(name_val.string);
+    } else return error.TestUnexpectedResult;
 }
 
 test "sqlx builder" {
@@ -2737,14 +2869,20 @@ test "mysql config init" {
 }
 
 test "postgres live connection" {
+    try skipUnlessDb("postgres");
     const allocator = std.testing.allocator;
+
+    // Support env overrides for CI and local dev
+    const conninfo_default = "host=localhost port=5432 dbname=postgres user=cborli";
+    const conninfo = std.process.getEnvVarOwned(allocator, "PGconninfo") catch conninfo_default;
+    const conninfo_owned = conninfo.ptr != conninfo_default.ptr;
+    if (conninfo_owned) {
+        defer allocator.free(conninfo);
+    }
+
     var client = Client.init(allocator, .{
         .driver = .postgres,
-        .host = "localhost",
-        .port = 5432,
-        .database = "postgres",
-        .username = "cborli",
-        .password = "",
+        .postgres_conninfo = conninfo,
     });
     defer client.deinit();
 
@@ -2761,20 +2899,48 @@ test "postgres live connection" {
     defer rows.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), rows.rows.len);
-    try std.testing.expectEqualStrings("Alice", rows.rows[0].get("name").?.string);
+    if (rows.rows[0].get("name")) |name_val| {
+        const name_str = name_val.string;
+        try std.testing.expectEqualStrings("Alice", name_str);
+        rows.allocator.free(name_str);
+    } else return error.TestUnexpectedResult;
 
     _ = try client.exec("DROP TABLE IF EXISTS zigzero_test_users", &.{});
 }
 
 test "mysql live connection" {
+    try skipUnlessDb("mysql");
     const allocator = std.testing.allocator;
+
+    // Support env overrides for CI and local dev
+    const host_default = "127.0.0.1";
+    const host = std.process.getEnvVarOwned(allocator, "MYSQL_HOST") catch host_default;
+    if (host.ptr != host_default.ptr) {
+        defer allocator.free(host);
+    }
+    const user_default = "root";
+    const user = std.process.getEnvVarOwned(allocator, "MYSQL_USER") catch user_default;
+    if (user.ptr != user_default.ptr) {
+        defer allocator.free(user);
+    }
+    const pass_default = "";
+    const pass = std.process.getEnvVarOwned(allocator, "MYSQL_PASSWORD") catch pass_default;
+    if (pass.ptr != pass_default.ptr) {
+        defer allocator.free(pass);
+    }
+    const db_default = "zigzero_test";
+    const db = std.process.getEnvVarOwned(allocator, "MYSQL_DATABASE") catch db_default;
+    if (db.ptr != db_default.ptr) {
+        defer allocator.free(db);
+    }
+
     var client = Client.init(allocator, .{
         .driver = .mysql,
-        .host = "localhost",
+        .host = host,
         .port = 3306,
-        .database = "mysql",
-        .username = "root",
-        .password = "",
+        .database = db,
+        .username = user,
+        .password = pass,
     });
     defer client.deinit();
 
@@ -2791,7 +2957,11 @@ test "mysql live connection" {
     defer rows.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), rows.rows.len);
-    try std.testing.expectEqualStrings("Alice", rows.rows[0].get("name").?.string);
+    if (rows.rows[0].get("name")) |name_val| {
+        const name_str = name_val.string;
+        try std.testing.expectEqualStrings("Alice", name_str);
+        allocator.free(name_str);
+    } else return error.TestUnexpectedResult;
 
     _ = try client.exec("DROP TABLE IF EXISTS zigzero_test_users", &.{});
 }
