@@ -286,6 +286,25 @@ post /users/login LoginReq LoginResp login
 | SQL Client | `infra/sqlx` | ✅ |
 | zigzeroctl | `tools/zigzeroctl` | ✅ |
 
+## Documentation
+
+Comprehensive documentation is available in the [docs/](docs/README.md) directory:
+
+- [Getting Started](docs/getting-started/installation.md) — Installation and setup
+- [Quick Start](docs/getting-started/quick-start.md) — 5-minute tour
+- [First Service Tutorial](docs/getting-started/first-service.md) — Build your first REST API
+- [HTTP API Server](docs/guides/api-server.md) — Routing, handlers, route groups
+- [Middleware](docs/guides/middleware.md) — Writing custom middleware
+- [Graceful Shutdown](docs/guides/graceful-shutdown.md) — Lifecycle hooks and signal handling
+- [Metrics & Observability](docs/guides/metrics.md) — Prometheus metrics integration
+- [Rate Limiting](docs/guides/rate-limiting.md) — Token bucket, sliding window, IP limits
+- [Circuit Breaker](docs/guides/circuit-breaker.md) — Resilience patterns
+- [Configuration](docs/guides/configuration.md) — YAML/JSON config loading
+- [Authentication](docs/guides/authentication.md) — JWT middleware and token generation
+- [chy3 Example](docs/examples/chy3.md) — Full-stack example across three business domains
+- [Architecture Overview](docs/architecture/overview.md) — Framework design principles
+- [Module Reference](docs/architecture/module-reference.md) — Complete API reference
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
