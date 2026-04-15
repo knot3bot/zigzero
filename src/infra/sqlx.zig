@@ -91,6 +91,7 @@ pub const Conn = struct {
         begin: *const fn (ptr: *anyopaque) errors.Result,
         commit: *const fn (ptr: *anyopaque) errors.Result,
         rollback: *const fn (ptr: *anyopaque) errors.Result,
+        prepare: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt),
     };
 
     pub fn query(self: Conn, allocator: std.mem.Allocator, sql_str: []const u8, args: []const Value) errors.ResultT(Rows) {
@@ -119,6 +120,10 @@ pub const Conn = struct {
 
     pub fn rollback(self: Conn) errors.Result {
         return self.vtable.rollback(self.ptr);
+    }
+
+    pub fn prepare(self: Conn, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt) {
+        return self.vtable.prepare(self.ptr, allocator, sql_str);
     }
 };
 
@@ -307,6 +312,14 @@ pub const SQLiteConn = struct {
         if (rc != sqlite3_c.SQLITE_OK) return error.DatabaseError;
     }
 
+    fn prepareFn(ptr: *anyopaque, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt) {
+        const self = @as(*SQLiteConn, @ptrCast(@alignCast(ptr)));
+        const stmt = allocator.create(SQLiteStmt) catch return error.DatabaseError;
+        errdefer allocator.destroy(stmt);
+        stmt.* = SQLiteStmt.prepare(self.db, allocator, sql_str) catch return error.DatabaseError;
+        return stmt.toStmt();
+    }
+
     pub fn toConn(self: *SQLiteConn) Conn {
         return .{
             .ptr = self,
@@ -318,6 +331,7 @@ pub const SQLiteConn = struct {
                 .begin = beginFn,
                 .commit = commitFn,
                 .rollback = rollbackFn,
+                .prepare = prepareFn,
             },
         };
     }
@@ -503,6 +517,14 @@ pub const PostgresConn = struct {
         if (libpq_c.PQresultStatus(res) != libpq_c.ExecStatusType.PGRES_COMMAND_OK) return error.DatabaseError;
     }
 
+    fn prepareFn(ptr: *anyopaque, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt) {
+        const self = @as(*PostgresConn, @ptrCast(@alignCast(ptr)));
+        const stmt = allocator.create(PostgresStmt) catch return error.DatabaseError;
+        errdefer allocator.destroy(stmt);
+        stmt.* = PostgresStmt.prepare(self.conn, allocator, sql_str) catch return error.DatabaseError;
+        return stmt.toStmt();
+    }
+
     pub fn toConn(self: *PostgresConn) Conn {
         return .{
             .ptr = self,
@@ -514,6 +536,7 @@ pub const PostgresConn = struct {
                 .begin = beginFn,
                 .commit = commitFn,
                 .rollback = rollbackFn,
+                .prepare = prepareFn,
             },
         };
     }
@@ -684,6 +707,14 @@ pub const MySqlConn = struct {
         libmysql_c.mysql_free_result(libmysql_c.mysql_store_result(self.mysql));
     }
 
+    fn prepareFn(ptr: *anyopaque, allocator: std.mem.Allocator, sql_str: []const u8) errors.ResultT(Stmt) {
+        const self = @as(*MySqlConn, @ptrCast(@alignCast(ptr)));
+        const stmt = allocator.create(MySqlStmt) catch return error.DatabaseError;
+        errdefer allocator.destroy(stmt);
+        stmt.* = MySqlStmt.prepare(self.mysql, allocator, sql_str) catch return error.DatabaseError;
+        return stmt.toStmt();
+    }
+
     pub fn toConn(self: *MySqlConn) Conn {
         return .{
             .ptr = self,
@@ -695,6 +726,7 @@ pub const MySqlConn = struct {
                 .begin = beginFn,
                 .commit = commitFn,
                 .rollback = rollbackFn,
+                .prepare = prepareFn,
             },
         };
     }
@@ -1308,29 +1340,7 @@ pub const Client = struct {
     }
 
     fn newStmt(self: *Client, conn: Conn, sql_str: []const u8) !Stmt {
-        switch (self.config.driver) {
-            .sqlite => {
-                const sqlite_conn = @as(*SQLiteConn, @ptrCast(@alignCast(conn.ptr)));
-                const stmt = try self.allocator.create(SQLiteStmt);
-                errdefer self.allocator.destroy(stmt);
-                stmt.* = try SQLiteStmt.prepare(sqlite_conn.db, self.allocator, sql_str);
-                return stmt.toStmt();
-            },
-            .postgres => {
-                const pg_conn = @as(*PostgresConn, @ptrCast(@alignCast(conn.ptr)));
-                const stmt = try self.allocator.create(PostgresStmt);
-                errdefer self.allocator.destroy(stmt);
-                stmt.* = try PostgresStmt.prepare(pg_conn.conn, self.allocator, sql_str);
-                return stmt.toStmt();
-            },
-            .mysql => {
-                const mysql_conn = @as(*MySqlConn, @ptrCast(@alignCast(conn.ptr)));
-                const stmt = try self.allocator.create(MySqlStmt);
-                errdefer self.allocator.destroy(stmt);
-                stmt.* = try MySqlStmt.prepare(mysql_conn.mysql, self.allocator, sql_str);
-                return stmt.toStmt();
-            },
-        }
+        return conn.prepare(self.allocator, sql_str);
     }
 
     fn ensureBreaker(self: *Client) void {
@@ -1621,6 +1631,15 @@ pub const Transaction = struct {
     pub fn rollbackCtx(self: *Transaction, ctx: SqlContext) !void {
         if (ctx.isDone()) return error.Timeout;
         return self.rollback();
+    }
+
+    pub fn prepare(self: *Transaction, allocator: std.mem.Allocator, sql_str: []const u8) !Stmt {
+        return self.conn.prepare(allocator, sql_str);
+    }
+
+    pub fn prepareCtx(self: *Transaction, ctx: SqlContext, allocator: std.mem.Allocator, sql_str: []const u8) !Stmt {
+        if (ctx.isDone()) return error.Timeout;
+        return self.prepare(allocator, sql_str);
     }
 };
 
