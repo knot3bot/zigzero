@@ -8,6 +8,7 @@ const errors = @import("../core/errors.zig");
 const sqlite3_c = @import("sqlite3_c.zig");
 const libpq_c = @import("libpq_c.zig");
 const libmysql_c = @import("libmysql_c.zig");
+const breaker = @import("breaker.zig");
 
 /// SQL value types for parameterized queries
 pub const Value = union(enum) {
@@ -1160,6 +1161,7 @@ pub const Client = struct {
     config: Config,
     conn: ?Conn = null,
     pool: ?ConnPool = null,
+    cb: ?breaker.CircuitBreaker = null,
 
     pub fn init(allocator: std.mem.Allocator, cfg: Config) Client {
         return .{
@@ -1167,6 +1169,7 @@ pub const Client = struct {
             .config = cfg,
             .conn = null,
             .pool = null,
+            .cb = null,
         };
     }
 
@@ -1188,6 +1191,7 @@ pub const Client = struct {
         switch (self.config.driver) {
             .sqlite => {
                 const sqlite = try self.allocator.create(SQLiteConn);
+                errdefer self.allocator.destroy(sqlite);
                 sqlite.* = try SQLiteConn.open(self.allocator, self.config.sqlite_path);
                 return sqlite.toConn();
             },
@@ -1204,11 +1208,13 @@ pub const Client = struct {
                     });
                 defer if (self.config.postgres_conninfo.len == 0) self.allocator.free(info);
                 const pg = try self.allocator.create(PostgresConn);
+                errdefer self.allocator.destroy(pg);
                 pg.* = try PostgresConn.connect(self.allocator, info);
                 return pg.toConn();
             },
             .mysql => {
                 const mysql = try self.allocator.create(MySqlConn);
+                errdefer self.allocator.destroy(mysql);
                 mysql.* = try MySqlConn.connect(self.allocator, self.config.host, self.config.username, self.config.password, self.config.database, self.config.port);
                 return mysql.toConn();
             },
@@ -1221,10 +1227,16 @@ pub const Client = struct {
     }
 
     pub fn prepare(self: *Client, sql_str: []const u8) !Stmt {
+        self.ensureBreaker();
+        if (!self.cb.?.allow()) return error.CircuitBreakerOpen;
         const conn = try self.newConn();
         errdefer conn.close();
-        var stmt = try self.newStmt(conn, sql_str);
+        var stmt = self.newStmt(conn, sql_str) catch |err| {
+            self.cb.?.recordFailure();
+            return err;
+        };
         stmt.conn = conn;
+        self.cb.?.recordSuccess();
         return stmt;
     }
 
@@ -1254,7 +1266,13 @@ pub const Client = struct {
         }
     }
 
-    pub fn query(self: *Client, sql_str: []const u8, args: []const Value) !Rows {
+    fn ensureBreaker(self: *Client) void {
+        if (self.cb == null) {
+            self.cb = breaker.CircuitBreaker.new();
+        }
+    }
+
+    fn doQuery(self: *Client, sql_str: []const u8, args: []const Value) !Rows {
         self.ensurePool();
         if (self.pool) |*p| {
             const conn = try p.acquire();
@@ -1265,7 +1283,18 @@ pub const Client = struct {
         return self.conn.?.query(self.allocator, sql_str, args);
     }
 
-    pub fn exec(self: *Client, sql_str: []const u8, args: []const Value) !ExecResult {
+    pub fn query(self: *Client, sql_str: []const u8, args: []const Value) !Rows {
+        self.ensureBreaker();
+        if (!self.cb.?.allow()) return error.CircuitBreakerOpen;
+        const result = self.doQuery(sql_str, args) catch |err| {
+            self.cb.?.recordFailure();
+            return err;
+        };
+        self.cb.?.recordSuccess();
+        return result;
+    }
+
+    fn doExec(self: *Client, sql_str: []const u8, args: []const Value) !ExecResult {
         self.ensurePool();
         if (self.pool) |*p| {
             const conn = try p.acquire();
@@ -1276,7 +1305,18 @@ pub const Client = struct {
         return self.conn.?.exec(sql_str, args);
     }
 
-    pub fn ping(self: *Client) !void {
+    pub fn exec(self: *Client, sql_str: []const u8, args: []const Value) !ExecResult {
+        self.ensureBreaker();
+        if (!self.cb.?.allow()) return error.CircuitBreakerOpen;
+        const result = self.doExec(sql_str, args) catch |err| {
+            self.cb.?.recordFailure();
+            return err;
+        };
+        self.cb.?.recordSuccess();
+        return result;
+    }
+
+    fn doPing(self: *Client) !void {
         self.ensurePool();
         if (self.pool) |*p| {
             const conn = try p.acquire();
@@ -1287,16 +1327,34 @@ pub const Client = struct {
         return self.conn.?.ping();
     }
 
+    pub fn ping(self: *Client) !void {
+        self.ensureBreaker();
+        if (!self.cb.?.allow()) return error.CircuitBreakerOpen;
+        self.doPing() catch |err| {
+            self.cb.?.recordFailure();
+            return err;
+        };
+        self.cb.?.recordSuccess();
+    }
+
     pub fn beginTx(self: *Client) !Transaction {
+        self.ensureBreaker();
+        if (!self.cb.?.allow()) return error.CircuitBreakerOpen;
         self.ensurePool();
         if (self.pool) |*p| {
             const conn = try p.acquire();
             errdefer p.release(conn);
-            try conn.begin();
+            conn.begin() catch |err| {
+                self.cb.?.recordFailure();
+                return err;
+            };
             return Transaction{ .conn = conn, .pool = p };
         }
         if (self.conn == null) try self.connect();
-        try self.conn.?.begin();
+        self.conn.?.begin() catch |err| {
+            self.cb.?.recordFailure();
+            return err;
+        };
         return Transaction{ .conn = self.conn.? };
     }
 
@@ -1364,6 +1422,165 @@ pub const Transaction = struct {
         if (self.pool) |p| {
             p.release(self.conn);
             self.pool = null;
+        }
+    }
+};
+
+fn deepCopyStruct(allocator: std.mem.Allocator, comptime T: type, src: T) !T {
+    var dst = src;
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const FieldType = field.type;
+        if (FieldType == []const u8) {
+            @field(dst, field.name) = try allocator.dupe(u8, @field(src, field.name));
+        } else if (@typeInfo(FieldType) == .optional and @typeInfo(FieldType).optional.child == []const u8) {
+            if (@field(src, field.name)) |s| {
+                @field(dst, field.name) = try allocator.dupe(u8, s);
+            }
+        }
+    }
+    return dst;
+}
+
+/// Simple string cache for testing CachedConn
+pub const StringCache = struct {
+    allocator: std.mem.Allocator,
+    map: std.StringHashMap([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator) StringCache {
+        return .{
+            .allocator = allocator,
+            .map = std.StringHashMap([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *StringCache) void {
+        var iter = self.map.valueIterator();
+        while (iter.next()) |v| self.allocator.free(v.*);
+        var key_iter = self.map.keyIterator();
+        while (key_iter.next()) |k| self.allocator.free(k.*);
+        self.map.deinit();
+    }
+
+    pub fn get(self: *StringCache, key: []const u8) ?[]const u8 {
+        const val = self.map.get(key) orelse return null;
+        return self.allocator.dupe(u8, val) catch null;
+    }
+
+    pub fn set(self: *StringCache, key: []const u8, value: []const u8, ttl_sec: u32) !void {
+        _ = ttl_sec;
+        const k = try self.allocator.dupe(u8, key);
+        const v = try self.allocator.dupe(u8, value);
+        const entry = self.map.getEntry(k);
+        if (entry) |e| {
+            self.allocator.free(e.value_ptr.*);
+            e.value_ptr.* = v;
+            self.allocator.free(k);
+        } else {
+            try self.map.put(k, v);
+        }
+    }
+
+    pub fn del(self: *StringCache, key: []const u8) void {
+        if (self.map.fetchRemove(key)) |entry| {
+            self.allocator.free(entry.value);
+            self.allocator.free(entry.key);
+        }
+    }
+};
+
+const redis = @import("redis.zig");
+
+/// Cached SQL connection aligned with go-zero's CachedConn
+pub const CachedConn = struct {
+    allocator: std.mem.Allocator,
+    client: *Client,
+    redis: ?*redis.Redis = null,
+    local_cache: ?*StringCache = null,
+    ttl_sec: u32 = 60,
+
+    pub fn queryRow(self: *CachedConn, comptime T: type, cache_key: []const u8, sql_str: []const u8, args: []const Value) !T {
+        if (self.getCache(cache_key)) |cached| {
+            defer self.allocator.free(cached);
+            var parsed = std.json.parseFromSlice(T, self.allocator, cached, .{}) catch return error.DatabaseError;
+            defer parsed.deinit();
+            return try deepCopyStruct(self.allocator, T, parsed.value);
+        }
+        const result = try self.client.queryRow(T, sql_str, args);
+        const json = std.json.Stringify.valueAlloc(self.allocator, result, .{}) catch {
+            return result;
+        };
+        defer self.allocator.free(json);
+        self.setCache(cache_key, json, self.ttl_sec) catch {};
+        return result;
+    }
+
+    pub fn queryRowNoCache(self: *CachedConn, comptime T: type, sql_str: []const u8, args: []const Value) !T {
+        return self.client.queryRow(T, sql_str, args);
+    }
+
+    pub fn queryRows(self: *CachedConn, comptime T: type, cache_key: []const u8, sql_str: []const u8, args: []const Value) ![]T {
+        if (self.getCache(cache_key)) |cached| {
+            defer self.allocator.free(cached);
+            var parsed = std.json.parseFromSlice([]T, self.allocator, cached, .{}) catch return error.DatabaseError;
+            defer parsed.deinit();
+            const result = try self.allocator.alloc(T, parsed.value.len);
+            errdefer {
+                for (result) |item| freeScanned(self.allocator, T, item);
+                self.allocator.free(result);
+            }
+            for (parsed.value, 0..) |item, i| {
+                result[i] = try deepCopyStruct(self.allocator, T, item);
+            }
+            return result;
+        }
+        const result = try self.client.queryRows(T, sql_str, args);
+        const json = std.json.Stringify.valueAlloc(self.allocator, result, .{}) catch {
+            return result;
+        };
+        defer self.allocator.free(json);
+        self.setCache(cache_key, json, self.ttl_sec) catch {};
+        return result;
+    }
+
+    pub fn queryRowsNoCache(self: *CachedConn, comptime T: type, sql_str: []const u8, args: []const Value) ![]T {
+        return self.client.queryRows(T, sql_str, args);
+    }
+
+    pub fn exec(self: *CachedConn, cache_keys: []const []const u8, sql_str: []const u8, args: []const Value) !ExecResult {
+        const result = try self.client.exec(sql_str, args);
+        for (cache_keys) |key| {
+            self.delCache(key) catch {};
+        }
+        return result;
+    }
+
+    fn getCache(self: *CachedConn, key: []const u8) ?[]const u8 {
+        if (self.local_cache) |lc| {
+            return lc.get(key);
+        }
+        if (self.redis) |r| {
+            return r.get(key) catch null;
+        }
+        return null;
+    }
+
+    fn setCache(self: *CachedConn, key: []const u8, value: []const u8, ttl: u32) !void {
+        if (self.local_cache) |lc| {
+            try lc.set(key, value, ttl);
+            return;
+        }
+        if (self.redis) |r| {
+            _ = r.set(key, value, ttl) catch {};
+        }
+    }
+
+    fn delCache(self: *CachedConn, key: []const u8) !void {
+        if (self.local_cache) |lc| {
+            lc.del(key);
+            return;
+        }
+        if (self.redis) |r| {
+            _ = r;
         }
     }
 };
@@ -1512,6 +1729,49 @@ pub const Builder = struct {
 
 // ==================== Tests ====================
 
+test "cached conn queryRow and exec" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator, .{ .driver = .sqlite, .sqlite_path = ":memory:" });
+    defer client.deinit();
+
+    _ = try client.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", &.{});
+    _ = try client.exec("INSERT INTO users (name) VALUES (?1)", &.{.{ .string = "Alice" }});
+
+    const User = struct {
+        id: i64,
+        name: []const u8,
+    };
+
+    var cache = StringCache.init(allocator);
+    defer cache.deinit();
+
+    var cached = CachedConn{
+        .allocator = allocator,
+        .client = &client,
+        .local_cache = &cache,
+        .ttl_sec = 60,
+    };
+
+    // First query should hit DB and populate cache
+    const user1 = try cached.queryRow(User, "user:1", "SELECT id, name FROM users WHERE id = ?1", &.{.{ .int = 1 }});
+    defer freeScanned(allocator, User, user1);
+    try std.testing.expectEqual(@as(i64, 1), user1.id);
+    try std.testing.expectEqualStrings("Alice", user1.name);
+
+    // Second query should hit cache
+    const user2 = try cached.queryRow(User, "user:1", "SELECT id, name FROM users WHERE id = ?1", &.{.{ .int = 999 }});
+    defer freeScanned(allocator, User, user2);
+    try std.testing.expectEqualStrings("Alice", user2.name);
+
+    // Exec with cache invalidation
+    _ = try cached.exec(&.{"user:1"}, "UPDATE users SET name = ?1 WHERE id = ?2", &.{ .{ .string = "Bob" }, .{ .int = 1 } });
+
+    // After invalidation, query should hit DB again
+    const user3 = try cached.queryRow(User, "user:1", "SELECT id, name FROM users WHERE id = ?1", &.{.{ .int = 1 }});
+    defer freeScanned(allocator, User, user3);
+    try std.testing.expectEqualStrings("Bob", user3.name);
+}
+
 test "sqlite in-memory query and exec" {
     const allocator = std.testing.allocator;
     var client = Client.init(allocator, .{ .driver = .sqlite, .sqlite_path = ":memory:" });
@@ -1644,6 +1904,24 @@ test "sqlite transact helper" {
     var rows = try client.query("SELECT name FROM users WHERE name = ?1", &.{.{ .string = "TxUser" }});
     defer rows.deinit();
     try std.testing.expectEqual(@as(usize, 1), rows.rows.len);
+}
+
+test "sqlite circuit breaker" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator, .{ .driver = .sqlite, .sqlite_path = "/nonexistent/path/bad.db" });
+    defer client.deinit();
+
+    var failures: u32 = 0;
+    for (0..15) |_| {
+        _ = client.query("SELECT 1", &.{}) catch {
+            failures += 1;
+        };
+    }
+    try std.testing.expectEqual(@as(u32, 15), failures);
+
+    // After enough failures, circuit breaker should be open
+    const err = client.query("SELECT 1", &.{}) catch |e| e;
+    try std.testing.expectEqual(errors.Error.CircuitBreakerOpen, err);
 }
 
 test "sqlite connection pool" {
