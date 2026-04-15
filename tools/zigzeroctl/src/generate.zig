@@ -295,20 +295,109 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     const struct_name = try camelCase(allocator, table_name);
     defer allocator.free(struct_name);
 
-    var fields_buf = std.ArrayList(u8){};
-    defer fields_buf.deinit(allocator);
-    const fw = fields_buf.writer(allocator);
-
+    var pk_type: []const u8 = "i64";
     for (columns) |col| {
-        try fw.print("    {s}: {s},\n", .{ col.name, col.zig_type });
+        if (std.mem.eql(u8, col.name, primary_key)) {
+            pk_type = col.zig_type;
+            break;
+        }
     }
 
-    const model_content = try std.fmt.allocPrint(allocator, template.model_zig, .{ struct_name, table_name, primary_key, fields_buf.items });
-    defer allocator.free(model_content);
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.writeAll("const std = @import(\"std\");\n");
+    try w.writeAll("const zigzero = @import(\"zigzero\");\n");
+    try w.writeAll("const sqlx = zigzero.sqlx;\n\n");
+    try w.print("pub const {s} = struct {{\n", .{struct_name});
+    try w.print("    pub const table_name = \"{s}\";\n", .{table_name});
+    try w.print("    pub const primary_key = \"{s}\";\n\n", .{primary_key});
+
+    for (columns) |col| {
+        try w.print("    {s}: {s},\n", .{ col.name, col.zig_type });
+    }
+
+    try w.writeAll("\n");
+
+    // findOne
+    try w.print("    pub fn findOne(client: *sqlx.Client, id: {s}) !{s} {{\n", .{ pk_type, struct_name });
+    try w.print("        return client.findOne({s}, table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, primary_key, zigFieldTypeLiteral(pk_type) });
+    try w.writeAll("    }\n\n");
+
+    // findOneCache
+    try w.print("    pub fn findOneCache(cached: *sqlx.CachedConn, id: {s}) !{s} {{\n", .{ pk_type, struct_name });
+    try w.print("        return cached.findOne({s}, \"{s}:{s}\", table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, table_name, primary_key, primary_key, zigFieldTypeLiteral(pk_type) });
+    try w.writeAll("    }\n\n");
+
+    // findAll
+    try w.print("    pub fn findAll(client: *sqlx.Client) ![]{s} {{\n", .{struct_name});
+    try w.print("        return client.findAll({s}, table_name, null, &.{{}});\n", .{struct_name});
+    try w.writeAll("    }\n\n");
+
+    // findAllCache
+    try w.print("    pub fn findAllCache(cached: *sqlx.CachedConn) ![]{s} {{\n", .{struct_name});
+    try w.print("        return cached.findAll({s}, \"{s}:all\", table_name, null, &.{{}});\n", .{ struct_name, table_name });
+    try w.writeAll("    }\n\n");
+
+    // insert
+    try w.writeAll("    pub fn insert(client: *sqlx.Client, data: *const ");
+    try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
+    try w.writeAll("        var b = sqlx.Builder.init(client.allocator, table_name);\n");
+    try w.writeAll("        const sql = try b.insert(&.{ ");
+    for (columns, 0..) |col, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.print("\"{s}\"", .{col.name});
+    }
+    try w.writeAll(" });\n");
+    try w.writeAll("        defer client.allocator.free(sql);\n");
+    try w.writeAll("        var args: [");
+    try w.print("{d}]sqlx.Value = undefined;\n", .{columns.len});
+    for (columns, 0..) |col, i| {
+        try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ i, col.name });
+    }
+    try w.writeAll("        return client.exec(sql, &args);\n");
+    try w.writeAll("    }\n\n");
+
+    // delete
+    try w.print("    pub fn delete(client: *sqlx.Client, id: {s}) !sqlx.ExecResult {{\n", .{pk_type});
+    try w.print("        const sql = try std.fmt.allocPrint(client.allocator, \"DELETE FROM {{s}} WHERE {s} = ?1\", .{{table_name}});\n", .{primary_key});
+    try w.writeAll("        defer client.allocator.free(sql);\n");
+    try w.print("        return client.exec(sql, &.{{ .{{ .{s} = id }} }});\n", .{zigFieldTypeLiteral(pk_type)});
+    try w.writeAll("    }\n");
+
+    try w.writeAll("};\n");
+
+    // Helper function: valueFromField
+    try w.writeAll("\nfn valueFromField(v: anytype) sqlx.Value {\n");
+    try w.writeAll("    const T = @TypeOf(v);\n");
+    try w.writeAll("    if (T == i64 or T == i32 or T == u64 or T == u32) {\n");
+    try w.writeAll("        return .{ .int = @intCast(v) };\n");
+    try w.writeAll("    } else if (T == f64 or T == f32) {\n");
+    try w.writeAll("        return .{ .float = @floatCast(v) };\n");
+    try w.writeAll("    } else if (T == bool) {\n");
+    try w.writeAll("        return .{ .bool = v };\n");
+    try w.writeAll("    } else if (T == []const u8) {\n");
+    try w.writeAll("        return .{ .string = v };\n");
+    try w.writeAll("    }\n");
+    try w.writeAll("    @compileError(\"Unsupported field type for sqlx.Value: \" ++ @typeName(T));\n");
+    try w.writeAll("}\n");
 
     const filename = try std.fmt.allocPrint(allocator, "{s}.zig", .{table_name});
     defer allocator.free(filename);
-    try out_dir.writeFile(.{ .sub_path = filename, .data = model_content });
+    try out_dir.writeFile(.{ .sub_path = filename, .data = buf.items });
+}
+
+fn zigFieldTypeLiteral(zig_type: []const u8) []const u8 {
+    if (std.mem.eql(u8, zig_type, "i64")) return "int";
+    if (std.mem.eql(u8, zig_type, "i32")) return "int";
+    if (std.mem.eql(u8, zig_type, "u64")) return "int";
+    if (std.mem.eql(u8, zig_type, "u32")) return "int";
+    if (std.mem.eql(u8, zig_type, "f64")) return "float";
+    if (std.mem.eql(u8, zig_type, "f32")) return "float";
+    if (std.mem.eql(u8, zig_type, "bool")) return "bool";
+    if (std.mem.eql(u8, zig_type, "[]const u8")) return "string";
+    return "string";
 }
 
 /// Parse simple CREATE TABLE SQL
