@@ -1939,7 +1939,10 @@ pub const Builder = struct {
     allocator: std.mem.Allocator,
     table: []const u8,
     select_columns: ?[][]const u8 = null,
+    join_clauses: ?[][]const u8 = null,
     where_clauses: ?[][]const u8 = null,
+    group_by_clause: ?[]const u8 = null,
+    having_clause: ?[]const u8 = null,
     order_by_clause: ?[]const u8 = null,
     limit_val: ?usize = null,
     offset_val: ?usize = null,
@@ -1953,16 +1956,41 @@ pub const Builder = struct {
 
     pub fn deinit(self: *Builder) void {
         if (self.select_columns) |cols| self.allocator.free(cols);
+        if (self.join_clauses) |joins| {
+            for (joins) |clause| self.allocator.free(clause);
+            self.allocator.free(joins);
+        }
         if (self.where_clauses) |wheres| {
             for (wheres) |clause| self.allocator.free(clause);
             self.allocator.free(wheres);
         }
+        if (self.group_by_clause) |g| self.allocator.free(g);
+        if (self.having_clause) |h| self.allocator.free(h);
         if (self.order_by_clause) |o| self.allocator.free(o);
     }
 
     pub fn selectColumns(self: *Builder, columns: []const []const u8) *Builder {
         if (self.select_columns) |cols| self.allocator.free(cols);
         self.select_columns = self.allocator.dupe([]const u8, columns) catch null;
+        return self;
+    }
+
+    pub fn join(self: *Builder, clause: []const u8) *Builder {
+        const new_clause = self.allocator.dupe(u8, clause) catch return self;
+        if (self.join_clauses) |joins| {
+            const new_j = self.allocator.realloc(joins, joins.len + 1) catch {
+                self.allocator.free(new_clause);
+                return self;
+            };
+            new_j[new_j.len - 1] = new_clause;
+            self.join_clauses = new_j;
+        } else {
+            self.join_clauses = self.allocator.alloc([]const u8, 1) catch {
+                self.allocator.free(new_clause);
+                return self;
+            };
+            self.join_clauses.?[0] = new_clause;
+        }
         return self;
     }
 
@@ -1982,6 +2010,18 @@ pub const Builder = struct {
             };
             self.where_clauses.?[0] = new_clause;
         }
+        return self;
+    }
+
+    pub fn groupBy(self: *Builder, clause: []const u8) *Builder {
+        if (self.group_by_clause) |g| self.allocator.free(g);
+        self.group_by_clause = self.allocator.dupe(u8, clause) catch null;
+        return self;
+    }
+
+    pub fn having(self: *Builder, clause: []const u8) *Builder {
+        if (self.having_clause) |h| self.allocator.free(h);
+        self.having_clause = self.allocator.dupe(u8, clause) catch null;
         return self;
     }
 
@@ -2017,12 +2057,26 @@ pub const Builder = struct {
             try std.fmt.format(w, "SELECT * FROM {s}", .{self.table});
         }
 
+        if (self.join_clauses) |joins| {
+            for (joins) |clause| {
+                try std.fmt.format(w, " {s}", .{clause});
+            }
+        }
+
         if (self.where_clauses) |wheres| {
             try w.writeAll(" WHERE ");
             for (wheres, 0..) |clause, i| {
                 if (i > 0) try w.writeAll(" AND ");
                 try w.writeAll(clause);
             }
+        }
+
+        if (self.group_by_clause) |g| {
+            try std.fmt.format(w, " GROUP BY {s}", .{g});
+        }
+
+        if (self.having_clause) |h| {
+            try std.fmt.format(w, " HAVING {s}", .{h});
         }
 
         if (self.order_by_clause) |o| {
@@ -2065,6 +2119,32 @@ pub const Builder = struct {
         try writer.writeAll(")");
 
         return self.allocator.dupe(u8, fbs.getWritten());
+    }
+
+    pub fn batchInsert(self: *const Builder, columns: []const []const u8, row_count: usize) ![]u8 {
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+
+        try writer.print("INSERT INTO {s} (", .{self.table});
+        for (columns, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(col);
+        }
+        try writer.writeAll(") VALUES ");
+        var param_idx: usize = 1;
+        for (0..row_count) |r| {
+            if (r > 0) try writer.writeAll(", ");
+            try writer.writeAll("(");
+            for (0..columns.len) |c| {
+                if (c > 0) try writer.writeAll(", ");
+                try writer.print("?{d}", .{param_idx});
+                param_idx += 1;
+            }
+            try writer.writeAll(")");
+        }
+
+        return self.allocator.dupe(u8, buf.items);
     }
 
     pub fn update(self: *const Builder, columns: []const []const u8) ![]u8 {
@@ -2288,6 +2368,36 @@ test "sqlx builder chainable" {
     defer allocator.free(sql);
 
     try std.testing.expectEqualStrings("SELECT id, name FROM users WHERE id = ?1 AND name = ?2 ORDER BY id DESC LIMIT 10 OFFSET 20", sql);
+}
+
+test "sqlx builder join group by having" {
+    const allocator = std.testing.allocator;
+    var b = Builder.init(allocator, "users");
+    defer b.deinit();
+
+    const sql = try b.selectColumns(&.{ "users.id", "users.name" })
+        .join("INNER JOIN orders ON orders.user_id = users.id")
+        .where("users.id = ?1")
+        .groupBy("users.id")
+        .having("COUNT(orders.id) > ?2")
+        .orderBy("users.id DESC")
+        .limit(10)
+        .toSql();
+    defer allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT users.id, users.name FROM users INNER JOIN orders ON orders.user_id = users.id WHERE users.id = ?1 GROUP BY users.id HAVING COUNT(orders.id) > ?2 ORDER BY users.id DESC LIMIT 10",
+        sql,
+    );
+}
+
+test "sqlx builder batch insert" {
+    const allocator = std.testing.allocator;
+    const b = Builder.init(allocator, "users");
+
+    const sql = try b.batchInsert(&.{ "name", "email" }, 3);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings("INSERT INTO users (name, email) VALUES (?1, ?2), (?3, ?4), (?5, ?6)", sql);
 }
 
 test "sqlite transaction commit" {

@@ -325,9 +325,19 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.print("        return client.findOne({s}, table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, primary_key, zigFieldTypeLiteral(pk_type) });
     try w.writeAll("    }\n\n");
 
+    // findOneCtx
+    try w.print("    pub fn findOneCtx(client: *sqlx.Client, ctx: sqlx.SqlContext, id: {s}) !{s} {{\n", .{ pk_type, struct_name });
+    try w.print("        return client.findOneCtx(ctx, {s}, table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, primary_key, zigFieldTypeLiteral(pk_type) });
+    try w.writeAll("    }\n\n");
+
     // findOneCache
     try w.print("    pub fn findOneCache(cached: *sqlx.CachedConn, id: {s}) !{s} {{\n", .{ pk_type, struct_name });
     try w.print("        return cached.findOne({s}, \"{s}:{s}\", table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, table_name, primary_key, primary_key, zigFieldTypeLiteral(pk_type) });
+    try w.writeAll("    }\n\n");
+
+    // findOneCacheCtx
+    try w.print("    pub fn findOneCacheCtx(cached: *sqlx.CachedConn, ctx: sqlx.SqlContext, id: {s}) !{s} {{\n", .{ pk_type, struct_name });
+    try w.print("        return cached.findOneCtx(ctx, {s}, \"{s}:{s}\", table_name, \"{s} = ?1\", &.{{ .{{ .{s} = id }} }});\n", .{ struct_name, table_name, primary_key, primary_key, zigFieldTypeLiteral(pk_type) });
     try w.writeAll("    }\n\n");
 
     // findAll
@@ -335,9 +345,19 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.print("        return client.findAll({s}, table_name, null, &.{{}});\n", .{struct_name});
     try w.writeAll("    }\n\n");
 
+    // findAllCtx
+    try w.print("    pub fn findAllCtx(client: *sqlx.Client, ctx: sqlx.SqlContext) ![]{s} {{\n", .{struct_name});
+    try w.print("        return client.findAllCtx(ctx, {s}, table_name, null, &.{{}});\n", .{struct_name});
+    try w.writeAll("    }\n\n");
+
     // findAllCache
     try w.print("    pub fn findAllCache(cached: *sqlx.CachedConn) ![]{s} {{\n", .{struct_name});
     try w.print("        return cached.findAll({s}, \"{s}:all\", table_name, null, &.{{}});\n", .{ struct_name, table_name });
+    try w.writeAll("    }\n\n");
+
+    // findAllCacheCtx
+    try w.print("    pub fn findAllCacheCtx(cached: *sqlx.CachedConn, ctx: sqlx.SqlContext) ![]{s} {{\n", .{struct_name});
+    try w.print("        return cached.findAllCtx(ctx, {s}, \"{s}:all\", table_name, null, &.{{}});\n", .{ struct_name, table_name });
     try w.writeAll("    }\n\n");
 
     // insert
@@ -345,7 +365,7 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
     try w.writeAll("        var b = sqlx.Builder.init(client.allocator, table_name);\n");
     try w.writeAll("        const sql = try b.insert(&.{ ");
-    for (columns, 0..) |col, i| {
+    for (columns, 0) |col, i| {
         if (i > 0) try w.writeAll(", ");
         try w.print("\"{s}\"", .{col.name});
     }
@@ -353,10 +373,29 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.writeAll("        defer client.allocator.free(sql);\n");
     try w.writeAll("        var args: [");
     try w.print("{d}]sqlx.Value = undefined;\n", .{columns.len});
-    for (columns, 0..) |col, i| {
+    for (columns, 0) |col, i| {
         try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ i, col.name });
     }
     try w.writeAll("        return client.exec(sql, &args);\n");
+    try w.writeAll("    }\n\n");
+
+    // insertCtx
+    try w.writeAll("    pub fn insertCtx(client: *sqlx.Client, ctx: sqlx.SqlContext, data: *const ");
+    try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
+    try w.writeAll("        var b = sqlx.Builder.init(client.allocator, table_name);\n");
+    try w.writeAll("        const sql = try b.insert(&.{ ");
+    for (columns, 0) |col, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.print("\"{s}\"", .{col.name});
+    }
+    try w.writeAll(" });\n");
+    try w.writeAll("        defer client.allocator.free(sql);\n");
+    try w.writeAll("        var args: [");
+    try w.print("{d}]sqlx.Value = undefined;\n", .{columns.len});
+    for (columns, 0) |col, i| {
+        try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ i, col.name });
+    }
+    try w.writeAll("        return client.execCtx(ctx, sql, &args);\n");
     try w.writeAll("    }\n\n");
 
     // insertCache
@@ -367,12 +406,20 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.writeAll("        return result;\n");
     try w.writeAll("    }\n\n");
 
+    // insertCacheCtx
+    try w.writeAll("    pub fn insertCacheCtx(cached: *sqlx.CachedConn, ctx: sqlx.SqlContext, data: *const ");
+    try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
+    try w.writeAll("        const result = try insertCtx(cached.client, ctx, data);\n");
+    try w.print("        _ = cached.delCache(\"{s}:all\") catch {{}};\n", .{table_name});
+    try w.writeAll("        return result;\n");
+    try w.writeAll("    }\n\n");
+
     // update
     try w.writeAll("    pub fn update(client: *sqlx.Client, data: *const ");
     try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
     try w.writeAll("        var b = sqlx.Builder.init(client.allocator, table_name);\n");
     try w.writeAll("        const set_sql = try b.update(&.{ ");
-    for (columns, 0..) |col, i| {
+    for (columns, 0) |col, i| {
         if (i > 0) try w.writeAll(", ");
         try w.print("\"{s}\"", .{col.name});
     }
@@ -382,17 +429,48 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.writeAll("        defer client.allocator.free(sql);\n");
     try w.writeAll("        var args: [");
     try w.print("{d}]sqlx.Value = undefined;\n", .{columns.len + 1});
-    for (columns, 0..) |col, i| {
+    for (columns, 0) |col, i| {
         try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ i, col.name });
     }
     try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ columns.len, primary_key });
     try w.writeAll("        return client.exec(sql, &args);\n");
     try w.writeAll("    }\n\n");
 
+    // updateCtx
+    try w.writeAll("    pub fn updateCtx(client: *sqlx.Client, ctx: sqlx.SqlContext, data: *const ");
+    try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
+    try w.writeAll("        var b = sqlx.Builder.init(client.allocator, table_name);\n");
+    try w.writeAll("        const set_sql = try b.update(&.{ ");
+    for (columns, 0) |col, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.print("\"{s}\"", .{col.name});
+    }
+    try w.writeAll(" });\n");
+    try w.writeAll("        defer client.allocator.free(set_sql);\n");
+    try w.print("        const sql = try std.fmt.allocPrint(client.allocator, \"{{s}} WHERE {s} = ?{d}\", .{{set_sql}});\n", .{ primary_key, columns.len + 1 });
+    try w.writeAll("        defer client.allocator.free(sql);\n");
+    try w.writeAll("        var args: [");
+    try w.print("{d}]sqlx.Value = undefined;\n", .{columns.len + 1});
+    for (columns, 0) |col, i| {
+        try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ i, col.name });
+    }
+    try w.print("        args[{d}] = valueFromField(data.{s});\n", .{ columns.len, primary_key });
+    try w.writeAll("        return client.execCtx(ctx, sql, &args);\n");
+    try w.writeAll("    }\n\n");
+
     // updateCache
     try w.writeAll("    pub fn updateCache(cached: *sqlx.CachedConn, data: *const ");
     try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
     try w.writeAll("        const result = try update(cached.client, data);\n");
+    try w.print("        _ = cached.delCache(\"{s}:all\") catch {{}};\n", .{table_name});
+    try w.print("        _ = cached.delCache(\"{s}:\" ++ std.fmt.allocPrint(cached.allocator, \"{{d}}\", .{{data.{s}}}) catch return result) catch {{}};\n", .{ table_name, primary_key });
+    try w.writeAll("        return result;\n");
+    try w.writeAll("    }\n\n");
+
+    // updateCacheCtx
+    try w.writeAll("    pub fn updateCacheCtx(cached: *sqlx.CachedConn, ctx: sqlx.SqlContext, data: *const ");
+    try w.print("{s}) !sqlx.ExecResult {{\n", .{struct_name});
+    try w.writeAll("        const result = try updateCtx(cached.client, ctx, data);\n");
     try w.print("        _ = cached.delCache(\"{s}:all\") catch {{}};\n", .{table_name});
     try w.print("        _ = cached.delCache(\"{s}:\" ++ std.fmt.allocPrint(cached.allocator, \"{{d}}\", .{{data.{s}}}) catch return result) catch {{}};\n", .{ table_name, primary_key });
     try w.writeAll("        return result;\n");
@@ -405,9 +483,24 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
     try w.print("        return client.exec(sql, &.{{ .{{ .{s} = id }} }});\n", .{zigFieldTypeLiteral(pk_type)});
     try w.writeAll("    }\n\n");
 
+    // deleteCtx
+    try w.print("    pub fn deleteCtx(client: *sqlx.Client, ctx: sqlx.SqlContext, id: {s}) !sqlx.ExecResult {{\n", .{pk_type});
+    try w.print("        const sql = try std.fmt.allocPrint(client.allocator, \"DELETE FROM {{s}} WHERE {s} = ?1\", .{{table_name}});\n", .{primary_key});
+    try w.writeAll("        defer client.allocator.free(sql);\n");
+    try w.print("        return client.execCtx(ctx, sql, &.{{ .{{ .{s} = id }} }});\n", .{zigFieldTypeLiteral(pk_type)});
+    try w.writeAll("    }\n\n");
+
     // deleteCache
     try w.print("    pub fn deleteCache(cached: *sqlx.CachedConn, id: {s}) !sqlx.ExecResult {{\n", .{pk_type});
     try w.writeAll("        const result = try delete(cached.client, id);\n");
+    try w.print("        _ = cached.delCache(\"{s}:all\") catch {{}};\n", .{table_name});
+    try w.print("        _ = cached.delCache(\"{s}:\" ++ std.fmt.allocPrint(cached.allocator, \"{{d}}\", .{{id}}) catch return result) catch {{}};\n", .{table_name});
+    try w.writeAll("        return result;\n");
+    try w.writeAll("    }\n\n");
+
+    // deleteCacheCtx
+    try w.print("    pub fn deleteCacheCtx(cached: *sqlx.CachedConn, ctx: sqlx.SqlContext, id: {s}) !sqlx.ExecResult {{\n", .{pk_type});
+    try w.writeAll("        const result = try deleteCtx(cached.client, ctx, id);\n");
     try w.print("        _ = cached.delCache(\"{s}:all\") catch {{}};\n", .{table_name});
     try w.print("        _ = cached.delCache(\"{s}:\" ++ std.fmt.allocPrint(cached.allocator, \"{{d}}\", .{{id}}) catch return result) catch {{}};\n", .{table_name});
     try w.writeAll("        return result;\n");
