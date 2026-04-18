@@ -3,6 +3,7 @@
 //! Provides Redis operations aligned with go-zero's redis functionality.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("../core/errors.zig");
 const config = @import("../config.zig");
 
@@ -10,7 +11,7 @@ const config = @import("../config.zig");
 pub const Redis = struct {
     allocator: std.mem.Allocator,
     config: config.RedisConfig,
-    stream: ?std.net.Stream = null,
+    stream: ?std.Io.net.Stream = null,
 
     /// Create a new Redis client
     pub fn new(allocator: std.mem.Allocator, cfg: config.RedisConfig) !Redis {
@@ -24,7 +25,7 @@ pub const Redis = struct {
     /// Deinitialize Redis client
     pub fn deinit(self: *Redis) void {
         if (self.stream) |s| {
-            s.close();
+            s.close(io_instance.io);
             self.stream = null;
         }
     }
@@ -38,7 +39,7 @@ pub const Redis = struct {
     /// Disconnect from Redis server
     pub fn disconnect(self: *Redis) void {
         if (self.stream) |s| {
-            s.close();
+            s.close(io_instance.io);
             self.stream = null;
         }
     }
@@ -49,10 +50,13 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$3\r\nGET\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w_buf: [1]u8 = undefined;
+            var _w = stream.writer(io_instance.io, &_w_buf);
+            _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [4096]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             // Parse bulk string response
@@ -84,10 +88,13 @@ pub const Redis = struct {
                 std.fmt.allocPrint(self.allocator, "*3\r\n$3\r\nSET\r\n${d}\r\n{s}\r\n${d}\r\n{s}\r\n", .{ key.len, key, value.len, value }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w_buf: [1]u8 = undefined;
+            var _w = stream.writer(io_instance.io, &_w_buf);
+            _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            _ = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            _ = r.interface.readSliceShort(&buf) catch return error.RedisError;
             return;
         }
         return error.RedisError;
@@ -99,10 +106,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*3\r\n$5\r\nSETNX\r\n${d}\r\n{s}\r\n${d}\r\n{s}\r\n", .{ key.len, key, value.len, value }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -116,18 +124,21 @@ pub const Redis = struct {
     /// Delete keys
     pub fn del(self: *Redis, keys: []const []const u8) errors.ResultT(u32) {
         if (self.stream) |stream| {
-            var cmd_builder: std.ArrayList(u8) = .{};
-            defer cmd_builder.deinit(self.allocator);
-
-            try cmd_builder.writer(self.allocator).print("*{d}\r\n$3\r\nDEL\r\n", .{keys.len + 1});
+            var cmd_w = std.Io.Writer.Allocating.init(self.allocator);
+            defer cmd_w.deinit();
+            const w = &cmd_w.writer;
+            w.print("*{d}\r\n$3\r\nDEL\r\n", .{keys.len + 1}) catch return error.RedisError;
             for (keys) |key| {
-                try cmd_builder.writer(self.allocator).print("${d}\r\n{s}\r\n", .{ key.len, key });
+                w.print("${d}\r\n{s}\r\n", .{ key.len, key}) catch return error.RedisError;
             }
 
-            _ = stream.write(cmd_builder.items) catch return error.RedisError;
+            var _w_buf: [1]u8 = undefined;
+            var _w = stream.writer(io_instance.io, &_w_buf);
+            _w.interface.writeAll(cmd_w.written()) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -144,10 +155,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$6\r\nEXISTS\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -164,10 +176,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$4\r\nINCR\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -184,10 +197,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$4\r\nDECR\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -204,10 +218,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*3\r\n$6\r\nEXPIRE\r\n${d}\r\n{s}\r\n${d}\r\n{d}\r\n", .{ key.len, key, std.fmt.count("{d}", .{seconds}), seconds }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            _ = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            _ = r.interface.readSliceShort(&buf) catch return error.RedisError;
             return;
         }
         return error.RedisError;
@@ -219,10 +234,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$3\r\nTTL\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -242,10 +258,11 @@ pub const Redis = struct {
             }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len >= 3 and std.mem.eql(u8, response[0..3], "+OK")) {
@@ -261,10 +278,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$3\r\nDEL\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            _ = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            _ = r.interface.readSliceShort(&buf) catch return error.RedisError;
         }
         return;
     }
@@ -275,10 +293,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*3\r\n$5\r\nLPUSH\r\n${d}\r\n{s}\r\n${d}\r\n{s}\r\n", .{ key.len, key, value.len, value }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -294,10 +313,11 @@ pub const Redis = struct {
             const cmd = std.fmt.allocPrint(self.allocator, "*2\r\n$4\r\nRPOP\r\n${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [4096]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1) {
@@ -327,10 +347,11 @@ pub const Redis = struct {
             }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -348,10 +369,11 @@ pub const Redis = struct {
             }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [4096]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1) {
@@ -381,10 +403,11 @@ pub const Redis = struct {
             }) catch return error.RedisError;
             defer self.allocator.free(cmd);
 
-            _ = stream.write(cmd) catch return error.RedisError;
+            var _w = stream.writer(io_instance.io, &[_]u8{0}); _w.interface.writeAll(cmd) catch return error.RedisError;
 
             var buf: [256]u8 = undefined;
-            const n = stream.read(&buf) catch return error.RedisError;
+            var r = stream.reader(io_instance.io, &buf);
+            const n = r.interface.readSliceShort(&buf) catch return error.RedisError;
             const response = buf[0..n];
 
             if (response.len > 1 and response[0] == ':') {
@@ -472,8 +495,8 @@ pub const RedisCluster = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .nodes = std.ArrayList(Redis){},
-            .node_configs = std.ArrayList(config.RedisConfig){},
+            .nodes = .empty,
+            .node_configs = .empty,
         };
     }
 

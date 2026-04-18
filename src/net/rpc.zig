@@ -69,7 +69,7 @@ pub const Client = struct {
             const endpoint = self.lb.select() orelse return error.ServiceUnavailable;
 
             // Build request
-            var request_builder: std.ArrayList(u8) = .{};
+            var request_builder: std.ArrayList(u8) = .empty;
             defer request_builder.deinit(self.allocator);
 
             // RPC header

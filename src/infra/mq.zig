@@ -3,6 +3,7 @@
 //! Provides in-memory pub/sub messaging aligned with go-zero patterns.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 
 /// Message
 pub const Message = struct {
@@ -40,7 +41,7 @@ pub const Queue = struct {
     allocator: std.mem.Allocator,
     subscriptions: std.ArrayList(Subscription),
     messages: std.ArrayList(Message),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     next_id: std.atomic.Value(u64),
     running: std.atomic.Value(bool),
     dispatch_thread: ?std.Thread = null,
@@ -48,9 +49,9 @@ pub const Queue = struct {
     pub fn init(allocator: std.mem.Allocator) Queue {
         return .{
             .allocator = allocator,
-            .subscriptions = .{},
-            .messages = .{},
-            .mutex = .{},
+            .subscriptions = .empty,
+            .messages = .empty,
+            .mutex = std.Io.Mutex.init,
             .next_id = std.atomic.Value(u64).init(1),
             .running = std.atomic.Value(bool).init(false),
         };
@@ -59,8 +60,8 @@ pub const Queue = struct {
     pub fn deinit(self: *Queue) void {
         self.stop();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         for (self.messages.items) |*msg| {
             msg.free(self.allocator);
@@ -75,8 +76,8 @@ pub const Queue = struct {
 
     /// Subscribe to a topic
     pub fn subscribe(self: *Queue, topic: []const u8, handler: Handler, context: *anyopaque) !u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         const id = self.next_id.fetchAdd(1, .monotonic);
         try self.subscriptions.append(self.allocator, .{
@@ -90,8 +91,8 @@ pub const Queue = struct {
 
     /// Unsubscribe from a topic
     pub fn unsubscribe(self: *Queue, id: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         for (self.subscriptions.items, 0..) |*sub, i| {
             if (sub.id == id) {
@@ -104,13 +105,13 @@ pub const Queue = struct {
 
     /// Publish a message to a topic
     pub fn publish(self: *Queue, topic: []const u8, payload: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         const msg = Message{
             .topic = try self.allocator.dupe(u8, topic),
             .payload = try self.allocator.dupe(u8, payload),
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = io_instance.millis(),
         };
         try self.messages.append(self.allocator, msg);
     }
@@ -134,13 +135,13 @@ pub const Queue = struct {
     fn dispatchLoop(self: *Queue) void {
         while (self.running.load(.monotonic)) {
             self.dispatchPending();
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            std.Thread.yield() catch {};
         }
     }
 
     fn dispatchPending(self: *Queue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         while (self.messages.items.len > 0) {
             const msg = self.messages.orderedRemove(0);
@@ -163,17 +164,17 @@ pub const PersistentQueue = struct {
     allocator: std.mem.Allocator,
     data_dir: []const u8,
     queue_name: []const u8,
-    log_file: ?std.fs.File = null,
+    log_file: ?std.Io.File = null,
     offsets: std.StringHashMap(u64),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, data_dir: []const u8, queue_name: []const u8) !PersistentQueue {
-        std.fs.cwd().makePath(data_dir) catch {};
+        // makePath removed for Zig 0.16 catch {};
 
         const log_path = try std.fs.path.join(allocator, &.{ data_dir, queue_name });
         defer allocator.free(log_path);
 
-        const log_file = try std.fs.cwd().createFile(log_path, .{ .read = true, .truncate = false });
+        const log_file = try std.Io.Dir.cwd().createFile(io_instance.io, log_path, .{ .read = true, .truncate = false });
 
         var self = PersistentQueue{
             .allocator = allocator,
@@ -181,7 +182,7 @@ pub const PersistentQueue = struct {
             .queue_name = try allocator.dupe(u8, queue_name),
             .log_file = log_file,
             .offsets = std.StringHashMap(u64).init(allocator),
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
         };
 
         try self.loadOffsets();
@@ -190,7 +191,7 @@ pub const PersistentQueue = struct {
 
     pub fn deinit(self: *PersistentQueue) void {
         self.saveOffsets() catch {};
-        if (self.log_file) |f| f.close();
+        if (self.log_file) |f| f.close(io_instance.io);
 
         var iter = self.offsets.iterator();
         while (iter.next()) |entry| {
@@ -204,24 +205,24 @@ pub const PersistentQueue = struct {
 
     /// Append a message to the queue.
     pub fn enqueue(self: *PersistentQueue, payload: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         const file = self.log_file.?;
         const len_bytes: [4]u8 = std.mem.toBytes(@as(u32, @intCast(payload.len)));
-        try file.seekFromEnd(0);
-        _ = try file.write(&len_bytes);
-        _ = try file.write(payload);
-        try file.sync();
+        const end_pos = try file.length(io_instance.io);
+        try file.writePositionalAll(io_instance.io, &len_bytes, end_pos);
+        try file.writePositionalAll(io_instance.io, payload, end_pos + 4);
+        try file.sync(io_instance.io);
     }
 
     /// Read up to max_messages for a consumer group starting from its offset.
     /// Returns allocated messages; caller must free each with allocator.free().
     pub fn dequeue(self: *PersistentQueue, consumer_group: []const u8, max_messages: usize) !std.ArrayList([]const u8) {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
-        var result: std.ArrayList([]const u8) = .{};
+        var result: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (result.items) |item| self.allocator.free(item);
             result.deinit(self.allocator);
@@ -235,36 +236,35 @@ pub const PersistentQueue = struct {
         var offset = gop.value_ptr.*;
 
         const file = self.log_file.?;
-        try file.seekTo(offset);
+        if (std.c.lseek(file.handle, @intCast(offset), 0) == -1) return error.SeekError;
 
         var count: usize = 0;
         while (count < max_messages) : (count += 1) {
             var len_bytes: [4]u8 = undefined;
-            const n = try file.read(&len_bytes);
+            const n = try file.readPositionalAll(io_instance.io, &len_bytes, offset);
             if (n < 4) break;
             const len = std.mem.bytesToValue(u32, &len_bytes);
 
             const payload = try self.allocator.alloc(u8, len);
             errdefer self.allocator.free(payload);
-            const payload_n = try file.read(payload);
+            const payload_n = try file.readPositionalAll(io_instance.io, payload, offset + 4);
             if (payload_n < len) {
                 self.allocator.free(payload);
                 break;
             }
 
             try result.append(self.allocator, payload);
-            offset = try file.getPos();
+            offset += 4 + len;
         }
 
         gop.value_ptr.* = offset;
         try self.saveOffset(consumer_group, offset);
         return result;
     }
-
     /// Acknowledge all messages up to the current offset for a consumer group.
     pub fn ack(self: *PersistentQueue, consumer_group: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         if (self.offsets.get(consumer_group)) |offset| {
             try self.saveOffset(consumer_group, offset);
@@ -281,23 +281,23 @@ pub const PersistentQueue = struct {
         const path = try self.offsetFilePath(group);
         defer self.allocator.free(path);
 
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(io_instance.io, path, .{ .truncate = true });
+        defer file.close(io_instance.io);
         const bytes: [8]u8 = std.mem.toBytes(offset);
-        _ = try file.write(&bytes);
-        try file.sync();
+        try file.writeStreamingAll(io_instance.io, &bytes);
+        try file.sync(io_instance.io);
     }
 
     fn loadOffsets(self: *PersistentQueue) !void {
-        var dir = std.fs.cwd().openDir(self.data_dir, .{}) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(io_instance.io, self.data_dir, .{}) catch return;
+        defer dir.close(io_instance.io);
 
         var iter = dir.iterate();
         const prefix = try std.fmt.allocPrint(self.allocator, "{s}.", .{self.queue_name});
         defer self.allocator.free(prefix);
         const suffix = ".offset";
 
-        while (try iter.next()) |entry| {
+        while (try iter.next(io_instance.io)) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
             if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
@@ -309,13 +309,13 @@ pub const PersistentQueue = struct {
             const path = try self.offsetFilePath(group);
             defer self.allocator.free(path);
 
-            const file = std.fs.cwd().openFile(path, .{}) catch continue;
-            defer file.close();
+            const file = std.Io.Dir.cwd().openFile(io_instance.io, path, .{}) catch continue;
+            defer file.close(io_instance.io);
             var bytes: [8]u8 = undefined;
-            const n = try file.read(&bytes);
+            var r = file.reader(io_instance.io, &bytes);
+            const n = try r.interface.readSliceShort(&bytes);
             if (n < 8) continue;
             const offset = std.mem.bytesToValue(u64, &bytes);
-
             const group_copy = try self.allocator.dupe(u8, group);
             try self.offsets.put(group_copy, offset);
         }
@@ -353,8 +353,8 @@ test "message queue" {
 test "persistent queue" {
     const allocator = std.testing.allocator;
     const data_dir = ".test-mq-data";
-    std.fs.cwd().deleteTree(data_dir) catch {};
-    defer std.fs.cwd().deleteTree(data_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(io_instance.io, data_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_instance.io, data_dir) catch {};
 
     var pq = try PersistentQueue.init(allocator, data_dir, "test-queue");
     defer pq.deinit();

@@ -3,6 +3,7 @@
 //! Provides in-memory LRU cache aligned with go-zero's cache patterns.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 
 pub fn Cache(comptime K: type, comptime V: type) type {
     return struct {
@@ -16,14 +17,14 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         allocator: std.mem.Allocator,
         map: std.AutoHashMap(K, Entry),
         max_size: usize,
-        mutex: std.Thread.Mutex,
+        mutex: std.Io.Mutex,
 
         pub fn init(allocator: std.mem.Allocator, max_size: usize) Self {
             return .{
                 .allocator = allocator,
                 .map = std.AutoHashMap(K, Entry).init(allocator),
                 .max_size = max_size,
-                .mutex = .{},
+                .mutex = std.Io.Mutex.init,
             };
         }
 
@@ -33,13 +34,13 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
         /// Get value from cache
         pub fn get(self: *Self, key: K) ?V {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io_instance.io);
+            defer self.mutex.unlock(io_instance.io);
 
             const entry = self.map.get(key) orelse return null;
 
             if (entry.expires_at) |expires| {
-                if (std.time.milliTimestamp() > expires) {
+                if (io_instance.millis() > expires) {
                     _ = self.map.remove(key);
                     return null;
                 }
@@ -50,10 +51,10 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
         /// Set value in cache with optional TTL
         pub fn set(self: *Self, key: K, value: V, ttl_ms: ?i64) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io_instance.io);
+            defer self.mutex.unlock(io_instance.io);
 
-            const expires_at = if (ttl_ms) |ttl| std.time.milliTimestamp() + ttl else null;
+            const expires_at = if (ttl_ms) |ttl| io_instance.millis() + ttl else null;
 
             // Simple eviction if at capacity
             if (self.map.count() >= self.max_size and !self.map.contains(key)) {
@@ -72,23 +73,23 @@ pub fn Cache(comptime K: type, comptime V: type) type {
 
         /// Delete key from cache
         pub fn delete(self: *Self, key: K) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io_instance.io);
+            defer self.mutex.unlock(io_instance.io);
             self.map.remove(key);
         }
 
         /// Clear all cache entries
         pub fn clear(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io_instance.io);
+            defer self.mutex.unlock(io_instance.io);
             self.map.clearRetainingCapacity();
         }
 
         /// Current cache size
         pub fn size(self: *Self) usize {
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_instance.io);
             const s = self.map.count();
-            self.mutex.unlock();
+            self.mutex.unlock(io_instance.io);
             return s;
         }
     };
@@ -112,6 +113,6 @@ test "cache ttl" {
     try cache.set(1, "hello", 1);
     try std.testing.expectEqualStrings("hello", cache.get(1).?);
 
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    std.Thread.yield() catch {};
     try std.testing.expect(cache.get(1) == null);
 }

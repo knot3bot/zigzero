@@ -16,8 +16,8 @@ pub const ConsistentHash = struct {
         return .{
             .allocator = allocator,
             .replicas = if (replicas == 0) 1 else replicas,
-            .nodes = .{},
-            .ring = .{},
+            .nodes = .empty,
+            .ring = .empty,
             .node_map = std.AutoHashMap(u32, []const u8).init(allocator),
         };
     }

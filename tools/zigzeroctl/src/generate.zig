@@ -2,16 +2,33 @@ const std = @import("std");
 const template = @import("template.zig");
 const dsl = @import("dsl.zig");
 
+/// Helper struct to write to ArrayList since Zig 0.16 removed ArrayList.writer()
+const ArrayListWriter = struct {
+    buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    pub fn writeAll(self: ArrayListWriter, data: []const u8) !void {
+        try self.buf.appendSlice(self.allocator, data);
+    }
+
+    pub fn print(self: ArrayListWriter, comptime fmt_str: []const u8, args: anytype) !void {
+        const formatted = try std.fmt.allocPrint(self.allocator, fmt_str, args);
+        defer self.allocator.free(formatted);
+        try self.buf.appendSlice(self.allocator, formatted);
+    }
+};
+
 /// Generate API from DSL definition
-pub fn generateApiFromDsl(allocator: std.mem.Allocator, def: dsl.ApiDef, output_dir: []const u8) !void {
-    const cwd = std.fs.cwd();
-    var out_dir = try cwd.makeOpenPath(output_dir, .{});
-    defer out_dir.close();
+pub fn generateApiFromDsl(allocator: std.mem.Allocator, io: std.Io, def: dsl.ApiDef, output_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, output_dir);
+    var out_dir = try cwd.openDir(io, output_dir, .{});
+    defer out_dir.close(io);
 
     // Generate types.zig
-    var types_buf: std.ArrayList(u8) = .{};
+    var types_buf: std.ArrayList(u8) = .empty;
     defer types_buf.deinit(allocator);
-    const tw = types_buf.writer(allocator);
+    const tw = ArrayListWriter{ .buf = &types_buf, .allocator = allocator };
 
     try tw.writeAll("const std = @import(\"std\");\n\n");
     for (def.types) |t| {
@@ -21,12 +38,12 @@ pub fn generateApiFromDsl(allocator: std.mem.Allocator, def: dsl.ApiDef, output_
         }
         try tw.writeAll("};\n\n");
     }
-    try out_dir.writeFile(.{ .sub_path = "types.zig", .data = types_buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "types.zig", .data = types_buf.items });
 
     // Generate handlers.zig
-    var handlers_buf: std.ArrayList(u8) = .{};
+    var handlers_buf: std.ArrayList(u8) = .empty;
     defer handlers_buf.deinit(allocator);
-    const hw = handlers_buf.writer(allocator);
+    const hw = ArrayListWriter{ .buf = &handlers_buf, .allocator = allocator };
 
     try hw.writeAll("const std = @import(\"std\");\n");
     try hw.writeAll("const zigzero = @import(\"zigzero\");\n");
@@ -51,12 +68,12 @@ pub fn generateApiFromDsl(allocator: std.mem.Allocator, def: dsl.ApiDef, output_
         }
         try hw.writeAll("}\n\n");
     }
-    try out_dir.writeFile(.{ .sub_path = "handlers.zig", .data = handlers_buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "handlers.zig", .data = handlers_buf.items });
 
     // Generate routes.zig
-    var routes_buf: std.ArrayList(u8) = .{};
+    var routes_buf: std.ArrayList(u8) = .empty;
     defer routes_buf.deinit(allocator);
-    const rw = routes_buf.writer(allocator);
+    const rw = ArrayListWriter{ .buf = &routes_buf, .allocator = allocator };
 
     try rw.writeAll("const std = @import(\"std\");\n");
     try rw.writeAll("const zigzero = @import(\"zigzero\");\n");
@@ -71,18 +88,19 @@ pub fn generateApiFromDsl(allocator: std.mem.Allocator, def: dsl.ApiDef, output_
     }
 
     try rw.writeAll("}\n");
-    try out_dir.writeFile(.{ .sub_path = "routes.zig", .data = routes_buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "routes.zig", .data = routes_buf.items });
 }
 
 /// Generate OpenAPI 3.0 JSON from DSL definition
-pub fn generateOpenApi(allocator: std.mem.Allocator, def: dsl.ApiDef, output_dir: []const u8) !void {
-    const cwd = std.fs.cwd();
-    var out_dir = try cwd.makeOpenPath(output_dir, .{});
-    defer out_dir.close();
+pub fn generateOpenApi(allocator: std.mem.Allocator, io: std.Io, def: dsl.ApiDef, output_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, output_dir);
+    var out_dir = try cwd.openDir(io, output_dir, .{});
+    defer out_dir.close(io);
 
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    const w = ArrayListWriter{ .buf = &buf, .allocator = allocator };
 
     try w.writeAll("{\n");
     try w.print("  \"openapi\": \"3.0.0\",\n", .{});
@@ -159,34 +177,35 @@ pub fn generateOpenApi(allocator: std.mem.Allocator, def: dsl.ApiDef, output_dir
     try w.writeAll("  }\n");
     try w.writeAll("}\n");
 
-    try out_dir.writeFile(.{ .sub_path = "openapi.json", .data = buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "openapi.json", .data = buf.items });
 }
 
 /// Generate a new project scaffold
-pub fn newProject(allocator: std.mem.Allocator, project_name: []const u8, output_dir: []const u8) !void {
-    const cwd = std.fs.cwd();
+pub fn newProject(allocator: std.mem.Allocator, io: std.Io, project_name: []const u8, output_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
 
     // Create project directory
-    var project_dir = try cwd.makeOpenPath(output_dir, .{});
-    defer project_dir.close();
+    try cwd.createDirPath(io, output_dir);
+    var project_dir = try cwd.openDir(io, output_dir, .{});
+    defer project_dir.close(io);
 
     // Create src directory
-    try project_dir.makePath("src");
+    try project_dir.createDirPath(io, "src");
 
     // Write build.zig
     const build_content = try std.fmt.allocPrint(allocator, template.project_build_zig, .{project_name});
     defer allocator.free(build_content);
-    try project_dir.writeFile(.{ .sub_path = "build.zig", .data = build_content });
+    try project_dir.writeFile(io, .{ .sub_path = "build.zig", .data = build_content });
 
     // Write build.zig.zon
     const zon_content = try std.fmt.allocPrint(allocator, template.build_zon, .{project_name});
     defer allocator.free(zon_content);
-    try project_dir.writeFile(.{ .sub_path = "build.zig.zon", .data = zon_content });
+    try project_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon_content });
 
     // Write src/main.zig
     const main_content = try std.fmt.allocPrint(allocator, template.main_zig, .{ project_name, project_name });
     defer allocator.free(main_content);
-    try project_dir.writeFile(.{ .sub_path = "src/main.zig", .data = main_content });
+    try project_dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = main_content });
 
     // Write .gitignore
     const gitignore =
@@ -194,7 +213,7 @@ pub fn newProject(allocator: std.mem.Allocator, project_name: []const u8, output
         \\.zig-cache/
         \\
     ;
-    try project_dir.writeFile(.{ .sub_path = ".gitignore", .data = gitignore });
+    try project_dir.writeFile(io, .{ .sub_path = ".gitignore", .data = gitignore });
 }
 
 /// API spec definition
@@ -210,15 +229,16 @@ pub const ApiRoute = struct {
 };
 
 /// Generate API routes and handlers from spec
-pub fn generateApi(allocator: std.mem.Allocator, spec: ApiSpec, output_dir: []const u8) !void {
-    const cwd = std.fs.cwd();
-    var out_dir = try cwd.makeOpenPath(output_dir, .{});
-    defer out_dir.close();
+pub fn generateApi(allocator: std.mem.Allocator, io: std.Io, spec: ApiSpec, output_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, output_dir);
+    var out_dir = try cwd.openDir(io, output_dir, .{});
+    defer out_dir.close(io);
 
     // Generate handlers.zig
-    var handlers_buf = std.ArrayList(u8){};
+    var handlers_buf = std.ArrayList(u8).empty;
     defer handlers_buf.deinit(allocator);
-    const hw = handlers_buf.writer(allocator);
+    const hw = ArrayListWriter{ .buf = &handlers_buf, .allocator = allocator };
 
     try hw.writeAll("const std = @import(\"std\");\n");
     try hw.writeAll("const zigzero = @import(\"zigzero\");\n");
@@ -230,12 +250,12 @@ pub fn generateApi(allocator: std.mem.Allocator, spec: ApiSpec, output_dir: []co
         try hw.writeAll("}\n\n");
     }
 
-    try out_dir.writeFile(.{ .sub_path = "handlers.zig", .data = handlers_buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "handlers.zig", .data = handlers_buf.items });
 
     // Generate routes.zig
-    var routes_buf = std.ArrayList(u8){};
+    var routes_buf = std.ArrayList(u8).empty;
     defer routes_buf.deinit(allocator);
-    const rw = routes_buf.writer(allocator);
+    const rw = ArrayListWriter{ .buf = &routes_buf, .allocator = allocator };
 
     try rw.writeAll("const std = @import(\"std\");\n");
     try rw.writeAll("const zigzero = @import(\"zigzero\");\n");
@@ -251,7 +271,7 @@ pub fn generateApi(allocator: std.mem.Allocator, spec: ApiSpec, output_dir: []co
 
     try rw.writeAll("}\n");
 
-    try out_dir.writeFile(.{ .sub_path = "routes.zig", .data = routes_buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = "routes.zig", .data = routes_buf.items });
 }
 
 /// Parse a simple JSON API spec
@@ -263,7 +283,7 @@ pub fn parseApiSpec(allocator: std.mem.Allocator, content: []const u8) !ApiSpec 
     const name = root.object.get("name") orelse return error.InvalidSpec;
     const routes_arr = root.object.get("routes") orelse return error.InvalidSpec;
 
-    var routes = std.ArrayList(ApiRoute){};
+    var routes = std.ArrayList(ApiRoute).empty;
     defer routes.deinit(allocator);
 
     for (routes_arr.array.items) |item| {
@@ -287,10 +307,11 @@ pub const ColumnInfo = struct {
 };
 
 /// Generate model from SQL DDL
-pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, columns: []const ColumnInfo, primary_key: []const u8, output_dir: []const u8) !void {
-    const cwd = std.fs.cwd();
-    var out_dir = try cwd.makeOpenPath(output_dir, .{});
-    defer out_dir.close();
+pub fn generateModel(allocator: std.mem.Allocator, io: std.Io, table_name: []const u8, columns: []const ColumnInfo, primary_key: []const u8, output_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, output_dir);
+    var out_dir = try cwd.openDir(io, output_dir, .{});
+    defer out_dir.close(io);
 
     const struct_name = try camelCase(allocator, table_name);
     defer allocator.free(struct_name);
@@ -303,9 +324,9 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
         }
     }
 
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    const w = ArrayListWriter{ .buf = &buf, .allocator = allocator };
 
     try w.writeAll("const std = @import(\"std\");\n");
     try w.writeAll("const zigzero = @import(\"zigzero\");\n");
@@ -525,7 +546,7 @@ pub fn generateModel(allocator: std.mem.Allocator, table_name: []const u8, colum
 
     const filename = try std.fmt.allocPrint(allocator, "{s}.zig", .{table_name});
     defer allocator.free(filename);
-    try out_dir.writeFile(.{ .sub_path = filename, .data = buf.items });
+    try out_dir.writeFile(io, .{ .sub_path = filename, .data = buf.items });
 }
 
 fn zigFieldTypeLiteral(zig_type: []const u8) []const u8 {
@@ -544,7 +565,7 @@ fn zigFieldTypeLiteral(zig_type: []const u8) []const u8 {
 pub fn parseCreateTable(allocator: std.mem.Allocator, sql: []const u8) !struct { table_name: []const u8, columns: []const ColumnInfo, primary_key: []const u8 } {
     var table_name: []const u8 = "";
     var primary_key: []const u8 = "";
-    var columns = std.ArrayList(ColumnInfo){};
+    var columns = std.ArrayList(ColumnInfo).empty;
     defer columns.deinit(allocator);
 
     // Very basic parser for: CREATE TABLE foo ( id INT PRIMARY KEY, name VARCHAR(255) )
@@ -623,7 +644,7 @@ fn sqlTypeToZig(sql_type: []const u8) []const u8 {
 }
 
 fn camelCase(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var result = std.ArrayList(u8){};
+    var result = std.ArrayList(u8).empty;
     defer result.deinit(allocator);
     var upper_next = true;
     for (s) |c| {
@@ -670,9 +691,9 @@ test "generate openapi from dsl" {
     };
 
     try generateOpenApi(allocator, def, ".test-openapi");
-    defer std.fs.cwd().deleteTree(".test-openapi") catch {};
+    defer std.Io.Dir.cwd().deleteTree(".test-openapi") catch {};
 
-    const content = try std.fs.cwd().readFileAlloc(allocator, ".test-openapi/openapi.json", 1024 * 1024);
+    const content = try std.Io.Dir.cwd().readFileAlloc(std.Io.Dir.cwd(), std.testing.io, ".test-openapi/openapi.json", allocator, .unlimited);
     defer allocator.free(content);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"/users/:id\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"getUser\"") != null);

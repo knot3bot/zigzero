@@ -18,11 +18,11 @@ pub const Context = struct {
     key_pem: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) !Context {
-        const cert_file = try std.fs.cwd().openFile(config.cert_file, .{});
+        const cert_file = try std.Io.Dir.cwd().openFile(config.cert_file, .{});
         defer cert_file.close();
         const cert_pem = try cert_file.readToEndAlloc(allocator, 1024 * 1024);
 
-        const key_file = try std.fs.cwd().openFile(config.key_file, .{});
+        const key_file = try std.Io.Dir.cwd().openFile(config.key_file, .{});
         defer key_file.close();
         const key_pem = try key_file.readToEndAlloc(allocator, 1024 * 1024);
 

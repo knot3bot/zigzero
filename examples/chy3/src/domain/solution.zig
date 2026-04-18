@@ -7,8 +7,9 @@
 //! - GET  /api/v1/royalties            — View royalty distributions
 
 const std = @import("std");
-const api = zigzero.api;
 const zigzero = @import("zigzero");
+const io_instance = zigzero.io_instance;
+const api = zigzero.api;
 const context = @import("../context.zig");
 const types = @import("../types.zig");
 
@@ -74,7 +75,8 @@ pub fn handleSubscribe(ctx: *api.Context) !void {
     const sub_id = try std.fmt.allocPrint(
         ctx.allocator,
         "sub_{d}",
-        .{std.time.timestamp()},
+        .{io_instance.seconds()},
+
     );
     defer ctx.allocator.free(sub_id);
 

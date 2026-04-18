@@ -140,7 +140,7 @@ pub const Query = struct {
         return .{
             .allocator = allocator,
             .table = table,
-            .where_clauses = .{},
+            .where_clauses = .empty,
         };
     }
 
@@ -174,32 +174,33 @@ pub const Query = struct {
     }
 
     pub fn build(self: *const Query) ![]const u8 {
-        var buf: std.ArrayList(u8) = .{};
-        defer buf.deinit(self.allocator);
+        var buf = std.Io.Writer.Allocating.init(self.allocator);
+        defer buf.deinit();
+        const w = &buf.writer;
 
-        try buf.writer(self.allocator).print("SELECT {s} FROM {s}", .{ self.select_fields, self.table });
+        try w.print("SELECT {s} FROM {s}", .{ self.select_fields, self.table });
 
         if (self.where_clauses.items.len > 0) {
-            try buf.writer(self.allocator).writeAll(" WHERE ");
+            try w.writeAll(" WHERE ");
             for (self.where_clauses.items, 0..) |clause, i| {
-                if (i > 0) try buf.writer(self.allocator).writeAll(" AND ");
-                try buf.writer(self.allocator).writeAll(clause);
+                if (i > 0) try w.writeAll(" AND ");
+                try w.writeAll(clause);
             }
         }
 
         if (self.order_by) |order_field| {
-            try buf.writer(self.allocator).print(" ORDER BY {s}", .{order_field});
+            try w.print(" ORDER BY {s}", .{order_field});
         }
 
         if (self.limit_val) |n| {
-            try buf.writer(self.allocator).print(" LIMIT {d}", .{n});
+            try w.print(" LIMIT {d}", .{n});
         }
 
         if (self.offset_val) |n| {
-            try buf.writer(self.allocator).print(" OFFSET {d}", .{n});
+            try w.print(" OFFSET {d}", .{n});
         }
 
-        return try self.allocator.dupe(u8, buf.items);
+        return try self.allocator.dupe(u8, buf.written());
     }
 };
 

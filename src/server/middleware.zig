@@ -3,6 +3,7 @@
 //! Provides common middleware implementations like auth, CORS, logging.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const api = @import("../net/api.zig");
 const errors = @import("../core/errors.zig");
 const limiter = @import("../infra/limiter.zig");
@@ -82,9 +83,9 @@ fn signJwt(allocator: std.mem.Allocator, claims: Claims, secret: []const u8) ![]
     const header_b64 = try base64UrlEncode(allocator, header);
     defer allocator.free(header_b64);
 
-    var payload_buf: std.ArrayList(u8) = .{};
-    defer payload_buf.deinit(allocator);
-    const w = payload_buf.writer(allocator);
+    var payload_buf = std.Io.Writer.Allocating.init(allocator);
+    defer payload_buf.deinit();
+    const w = &payload_buf.writer;
 
     try w.writeAll("{");
     var first = true;
@@ -115,7 +116,7 @@ fn signJwt(allocator: std.mem.Allocator, claims: Claims, secret: []const u8) ![]
     }
     try w.writeAll("}");
 
-    const payload_b64 = try base64UrlEncode(allocator, payload_buf.items);
+    const payload_b64 = try base64UrlEncode(allocator, payload_buf.written());
     defer allocator.free(payload_b64);
 
     const signed_data = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ header_b64, payload_b64 });
@@ -189,8 +190,12 @@ pub fn requestId() api.Middleware {
             fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
                 _ = data;
                 const request_id = ctx.header("X-Request-ID") orelse blk: {
-                    const timestamp = std.time.timestamp();
-                    const random = std.crypto.random.int(u32);
+                    const timestamp = io_instance.seconds();
+                const random = ctx: {
+                    var buf: [4]u8 = undefined;
+                    std.Io.random(io_instance.io, &buf);
+                    break :ctx @as(u32, @bitCast(buf));
+                };
                     const id = std.fmt.allocPrint(std.heap.page_allocator, "{d}-{x}", .{ timestamp, random }) catch "";
                     break :blk id;
                 };
@@ -284,9 +289,9 @@ pub fn logging() api.Middleware {
         .func = struct {
             fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
                 _ = data;
-                const start = std.time.milliTimestamp();
+                const start = io_instance.millis();
                 try next(ctx);
-                const duration = std.time.milliTimestamp() - start;
+                const duration = io_instance.millis() - start;
                 const msg = std.fmt.allocPrint(ctx.allocator, "{s} {s} - {d} ({d}ms)", .{
                     ctx.method.toString(),
                     ctx.raw_path,
@@ -410,7 +415,7 @@ pub fn observability(registry: *metric.Registry) api.Middleware {
         .func = struct {
             fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
                 const reg = @as(*metric.Registry, @ptrCast(@alignCast(data.?)));
-                const start = std.time.milliTimestamp();
+                const start = io_instance.millis();
 
                 // Auto trace span
                 var tracer = trace.Tracer.init(ctx.allocator, ctx.logger.service_name) catch null;
@@ -427,7 +432,7 @@ pub fn observability(registry: *metric.Registry) api.Middleware {
 
                 try next(ctx);
 
-                const duration = std.time.milliTimestamp() - start;
+                const duration = io_instance.millis() - start;
 
                 // Record metrics
                 const requests = reg.counter("http_requests_total", "Total HTTP requests") catch null;
@@ -453,11 +458,11 @@ pub fn observability(registry: *metric.Registry) api.Middleware {
 /// Prometheus metrics handler (expects registry in ctx.user_data)
 pub fn prometheusHandler(ctx: *api.Context) !void {
     const registry = @as(*metric.Registry, @ptrCast(@alignCast(ctx.user_data.?)));
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(ctx.allocator);
-    try registry.exportPrometheus(buf.writer(ctx.allocator));
+    var buf = std.Io.Writer.Allocating.init(ctx.allocator);
+    defer buf.deinit();
+    try registry.exportPrometheus(&buf.writer);
     try ctx.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-    try ctx.response_body.appendSlice(ctx.allocator, buf.items);
+    try ctx.response_body.appendSlice(ctx.allocator, buf.written());
     ctx.responded = true;
 }
 
@@ -489,9 +494,9 @@ pub fn requestTimeout(timeout_ms: u32) api.Middleware {
         .func = struct {
             fn middleware(ctx: *api.Context, next: api.HandlerFn, data: ?*anyopaque) anyerror!void {
                 const timeout = @as(u32, @intCast(@intFromPtr(data.?) & 0xFFFFFFFF));
-                const start = std.time.milliTimestamp();
+                const start = io_instance.millis();
                 try next(ctx);
-                const elapsed = std.time.milliTimestamp() - start;
+                const elapsed = io_instance.millis() - start;
                 if (@as(i64, @intCast(timeout)) < elapsed) {
                     ctx.status_code = 408;
                     ctx.responded = true;
@@ -529,9 +534,9 @@ pub fn healthHandler(ctx: *api.Context) !void {
     var results = try registry.checkAll();
     defer results.deinit();
 
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(ctx.allocator);
-    const w = buf.writer(ctx.allocator);
+    var buf = std.Io.Writer.Allocating.init(ctx.allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.writeAll("{\"status\":\"");
     const overall = try registry.overall();
@@ -563,7 +568,7 @@ pub fn healthHandler(ctx: *api.Context) !void {
     try w.writeAll("}}");
 
     const code: u16 = if (overall == .unhealthy) 503 else 200;
-    try ctx.json(code, buf.items);
+    try ctx.json(code, buf.written());
 }
 
 test "jwt generate and verify" {

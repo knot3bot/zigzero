@@ -97,13 +97,13 @@ fn skipCommentsAndBlank(line: []const u8) []const u8 {
 }
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) !ApiDef {
-    var types: std.ArrayList(TypeDef) = .{};
+    var types: std.ArrayList(TypeDef) = .empty;
     errdefer {
         for (types.items) |*t| t.deinit(allocator);
         types.deinit(allocator);
     }
 
-    var routes: std.ArrayList(RouteDef) = .{};
+    var routes: std.ArrayList(RouteDef) = .empty;
     errdefer {
         for (routes.items) |*r| r.deinit(allocator);
         routes.deinit(allocator);
@@ -117,7 +117,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !ApiDef {
         const line = skipCommentsAndBlank(raw_line);
         if (line.len == 0) continue;
 
-        var tokens: std.ArrayList([]const u8) = .{};
+        var tokens: std.ArrayList([]const u8) = .empty;
         defer {
             for (tokens.items) |t| allocator.free(t);
             tokens.deinit(allocator);
@@ -142,7 +142,7 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !ApiDef {
             const type_name = tokens.items[1];
 
             // Collect fields until closing brace
-            var fields: std.ArrayList(StructField) = .{};
+            var fields: std.ArrayList(StructField) = .empty;
             errdefer {
                 for (fields.items) |f| allocator.free(f.name);
                 fields.deinit(allocator);

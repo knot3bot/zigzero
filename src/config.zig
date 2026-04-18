@@ -213,7 +213,7 @@ pub const Loader = struct {
 
     /// Load configuration from JSON file
     pub fn loadJson(self: Loader, comptime T: type, path: []const u8) !T {
-        const file = try std.fs.cwd().openFile(path, .{});
+        const file = try std.Io.Dir.cwd().openFile(path, .{});
         defer file.close();
 
         const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
@@ -224,7 +224,7 @@ pub const Loader = struct {
 
     /// Load configuration from YAML file (simplified YAML subset)
     pub fn loadYaml(self: Loader, comptime T: type, path: []const u8) !T {
-        const file = try std.fs.cwd().openFile(path, .{});
+        const file = try std.Io.Dir.cwd().openFile(path, .{});
         defer file.close();
 
         const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
@@ -310,7 +310,7 @@ pub const Loader = struct {
 /// Convert a simplified YAML subset to JSON string.
 /// Supports: key: value, nested objects, arrays with '- ', strings, numbers, bools.
 fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
-    var line_list: std.ArrayList([]const u8) = .{};
+    var line_list: std.ArrayList([]const u8) = .empty;
     defer line_list.deinit(allocator);
 
     var lines_iter = std.mem.splitScalar(u8, yaml, '\n');
@@ -324,10 +324,10 @@ fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
     const yaml_lines = line_list.items;
     var line_idx: usize = 0;
 
-    var stack: std.ArrayList(usize) = .{};
+    var stack: std.ArrayList(usize) = .empty;
     defer stack.deinit(allocator);
 
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     try result.appendSlice(allocator, "{");
@@ -341,7 +341,7 @@ fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
         line_idx += 1;
 
         const indent = countIndent(line);
-        const trimmed = std.mem.trimLeft(u8, line, " ");
+        const trimmed = std.mem.trimStart(u8, line, " ");
 
         // Handle array items
         if (std.mem.startsWith(u8, trimmed, "- ")) {
@@ -353,7 +353,7 @@ fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
             if (!first_item) try result.appendSlice(allocator, ",");
             first_item = false;
 
-            const item = std.mem.trimLeft(u8, trimmed[2..], " ");
+            const item = std.mem.trimStart(u8, trimmed[2..], " ");
             try appendYamlValue(allocator, &result, item);
             continue;
         }
@@ -367,7 +367,7 @@ fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
         // Parse key: value (supports both "key: value" and "key:")
         if (std.mem.indexOf(u8, trimmed, ":")) |colon_pos| {
             const key = std.mem.trim(u8, trimmed[0..colon_pos], " \"");
-            const value = std.mem.trimLeft(u8, trimmed[colon_pos + 1 ..], " ");
+            const value = std.mem.trimStart(u8, trimmed[colon_pos + 1 ..], " ");
 
             // Adjust nesting based on indentation
             while (stack.items.len > 1 and indent <= stack.items[stack.items.len - 1]) {
@@ -388,7 +388,7 @@ fn yamlToJson(allocator: std.mem.Allocator, yaml: []const u8) ![]u8 {
                 // Peek ahead to detect if next line is an array item
                 const is_array = blk: {
                     if (line_idx < yaml_lines.len) {
-                        const next_trimmed = std.mem.trimLeft(u8, yaml_lines[line_idx], " ");
+                        const next_trimmed = std.mem.trimStart(u8, yaml_lines[line_idx], " ");
                         if (std.mem.startsWith(u8, next_trimmed, "- ")) break :blk true;
                     }
                     break :blk false;
@@ -425,7 +425,7 @@ fn stripComment(line: []const u8) []const u8 {
         return line[0..pos];
     }
     if (line.len > 0 and line[0] == '#') return "";
-    return std.mem.trimRight(u8, line, "\r");
+    return std.mem.trimEnd(u8, line, "\r");
 }
 
 fn countIndent(line: []const u8) usize {
@@ -510,7 +510,7 @@ pub fn Watcher(comptime T: type) type {
 
         /// Check if the config file has changed since last check
         pub fn hasChanged(self: *Self) bool {
-            const stat = std.fs.cwd().statFile(self.file_path) catch return false;
+            const stat = std.Io.Dir.cwd().statFile(self.file_path) catch return false;
             const mtime = stat.mtime;
             if (mtime > self.last_modified) {
                 self.last_modified = mtime;
@@ -537,7 +537,7 @@ pub fn Watcher(comptime T: type) type {
             }
 
             while (true) {
-                std.Thread.sleep(self.interval_ms * std.time.ns_per_ms);
+                std.Thread.yield() catch {};
                 if (self.hasChanged()) {
                     const cfg = self.reload() catch continue;
                     callback(cfg);

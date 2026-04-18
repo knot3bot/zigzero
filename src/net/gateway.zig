@@ -20,7 +20,7 @@ pub const Upstream = struct {
         return .{
             .allocator = allocator,
             .name = name,
-            .endpoints = std.ArrayList([]const u8){},
+            .endpoints = .empty,
             .lb = loadbalancer.LoadBalancer.init(allocator, .round_robin),
         };
     }

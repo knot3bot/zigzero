@@ -3,6 +3,7 @@
 //! Provides distributed locking patterns aligned with go-zero.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("../core/errors.zig");
 const redis = @import("redis.zig");
 
@@ -34,7 +35,7 @@ pub const RedisLock = struct {
         // Use Lua script for atomic release: if value matches, delete key
         const script_fmt = "*4\r\n$6\r\nEVAL\r\n$45\r\nif redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end\r\n$1\r\n1\r\n";
         if (self.client.stream) |stream| {
-            var cmd_builder: std.ArrayList(u8) = .{};
+            var cmd_builder: std.ArrayList(u8) = .empty;
             defer cmd_builder.deinit(self.client.allocator);
             cmd_builder.writer(self.client.allocator).writeAll(script_fmt) catch return error.RedisError;
             cmd_builder.writer(self.client.allocator).print("${d}\r\n{s}\r\n", .{ key.len, key }) catch return error.RedisError;
@@ -66,13 +67,13 @@ pub const RedisLock = struct {
 
 /// In-process lock for single-node use
 pub const LocalLock = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     locked: std.atomic.Value(bool),
     owner: ?[]const u8,
 
     pub fn init() LocalLock {
         return .{
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
             .locked = std.atomic.Value(bool).init(false),
             .owner = null,
         };
@@ -80,26 +81,26 @@ pub const LocalLock = struct {
 
     pub fn acquire(self: *LocalLock, key: []const u8, value: []const u8, ttl_seconds: u32) errors.ResultT(bool) {
         _ = ttl_seconds;
-        self.mutex.lock();
+        self.mutex.lockUncancelable(io_instance.io);
         if (self.locked.load(.monotonic)) {
-            self.mutex.unlock();
+            self.mutex.unlock(io_instance.io);
             return false;
         }
         self.locked.store(true, .monotonic);
         self.owner = key;
         _ = value;
-        self.mutex.unlock();
+        self.mutex.unlock(io_instance.io);
         return true;
     }
 
     pub fn release(self: *LocalLock, key: []const u8, value: []const u8) errors.Result {
         _ = value;
-        self.mutex.lock();
+        self.mutex.lockUncancelable(io_instance.io);
         if (self.owner != null and std.mem.eql(u8, self.owner.?, key)) {
             self.locked.store(false, .monotonic);
             self.owner = null;
         }
-        self.mutex.unlock();
+        self.mutex.unlock(io_instance.io);
     }
 };
 

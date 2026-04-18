@@ -4,6 +4,7 @@
 //! is under load, based on response time and throughput.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("errors.zig");
 
 const default_buckets = 50;
@@ -72,7 +73,7 @@ pub fn RollingWindow(comptime T: type) type {
         }
 
         pub fn add(self: *Self, value: T) void {
-            const now_ms = std.time.milliTimestamp();
+            const now_ms = io_instance.millis();
             self.advance(now_ms);
             self.buckets[self.last_index].sum += value;
             self.buckets[self.last_index].count += 1;
@@ -110,7 +111,7 @@ pub const Promise = struct {
 
     pub fn pass(self: *const Promise) void {
         if (self.shedder) |s| {
-            const rt = @as(f64, @floatFromInt(std.time.milliTimestamp() - self.start_ms));
+            const rt = @as(f64, @floatFromInt(io_instance.millis() - self.start_ms));
             const rt_ceil: i64 = @intFromFloat(@ceil(rt));
             s.addFlying(-1);
             s.rt_counter.add(rt_ceil);
@@ -143,7 +144,7 @@ pub const NopShedder = struct {
     pub fn allow(self: *NopShedder) errors.Error!Promise {
         _ = self;
         return Promise{
-            .start_ms = std.time.milliTimestamp(),
+            .start_ms = io_instance.millis(),
             .shedder = null,
         };
     }
@@ -155,7 +156,7 @@ pub const AdaptiveShedder = struct {
     window_scale: f64,
     flying: i64,
     avg_flying: f64,
-    avg_flying_mutex: std.Thread.Mutex,
+    avg_flying_mutex: std.Io.Mutex,
     overload_time_ms: std.atomic.Value(i64),
     dropped_recently: std.atomic.Value(bool),
     pass_counter: RollingWindow(i64),
@@ -172,7 +173,7 @@ pub const AdaptiveShedder = struct {
             .window_scale = window_scale,
             .flying = 0,
             .avg_flying = 0,
-            .avg_flying_mutex = .{},
+            .avg_flying_mutex = std.Io.Mutex.init,
             .overload_time_ms = std.atomic.Value(i64).init(0),
             .dropped_recently = std.atomic.Value(bool).init(false),
             .pass_counter = try RollingWindow(i64).init(allocator, opts.buckets, bucket_duration_ms),
@@ -193,7 +194,7 @@ pub const AdaptiveShedder = struct {
         }
         self.addFlying(1);
         return Promise{
-            .start_ms = std.time.milliTimestamp(),
+            .start_ms = io_instance.millis(),
             .shedder = self,
         };
     }
@@ -202,9 +203,9 @@ pub const AdaptiveShedder = struct {
         const prev = @atomicRmw(i64, &self.flying, .Add, delta, .monotonic);
         if (delta < 0) {
             const new_flying = prev + delta;
-            self.avg_flying_mutex.lock();
+            self.avg_flying_mutex.lockUncancelable(io_instance.io);
             self.avg_flying = self.avg_flying * flying_beta + @as(f64, @floatFromInt(new_flying)) * (1.0 - flying_beta);
-            self.avg_flying_mutex.unlock();
+            self.avg_flying_mutex.unlock(io_instance.io);
         }
     }
 
@@ -221,7 +222,7 @@ pub const AdaptiveShedder = struct {
         if (!self.cpu_overloaded_fn(self.cpu_threshold)) {
             return false;
         }
-        self.overload_time_ms.store(std.time.milliTimestamp(), .monotonic);
+        self.overload_time_ms.store(io_instance.millis(), .monotonic);
         return true;
     }
 
@@ -233,7 +234,7 @@ pub const AdaptiveShedder = struct {
         if (overload_time == 0) {
             return false;
         }
-        if (std.time.milliTimestamp() - overload_time < cool_off_duration_ms) {
+        if (io_instance.millis() - overload_time < cool_off_duration_ms) {
             return true;
         }
         self.dropped_recently.store(false, .monotonic);
@@ -241,9 +242,9 @@ pub const AdaptiveShedder = struct {
     }
 
     fn highThru(self: *Self) bool {
-        self.avg_flying_mutex.lock();
+        self.avg_flying_mutex.lockUncancelable(io_instance.io);
         const avg_flying = self.avg_flying;
-        self.avg_flying_mutex.unlock();
+        self.avg_flying_mutex.unlock(io_instance.io);
         const max_flight = self.maxFlight() * self.overloadFactor();
         const flying_val = @atomicLoad(i64, &self.flying, .monotonic);
         return avg_flying > max_flight and @as(f64, @floatFromInt(flying_val)) > max_flight;
@@ -290,7 +291,7 @@ test "adaptive shedder basic" {
 
     // Should allow normally
     const p = try shedder.allow();
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    std.Thread.yield() catch {};
     p.pass();
 
     // Nop shedder should always allow
@@ -322,7 +323,7 @@ test "adaptive shedder drops under high load" {
     while (i < 20) : (i += 1) {
         if (shedder.allow()) |p| {
             allowed += 1;
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            std.Thread.yield() catch {};
             p.pass();
         } else |_| {
             dropped += 1;

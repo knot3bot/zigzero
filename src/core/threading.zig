@@ -7,40 +7,43 @@ const errors = @import("errors.zig");
 
 /// RoutineGroup is like Go's sync.WaitGroup.
 /// Spawns tasks and waits for all to complete.
+/// NOTE: Simplified for Zig 0.16 - uses atomic counter instead of WaitGroup
 pub const RoutineGroup = struct {
-    wg: std.Thread.WaitGroup,
+    count: std.atomic.Value(usize),
 
     pub fn init() RoutineGroup {
-        return .{ .wg = .{} };
+        return .{ .count = std.atomic.Value(usize).init(0) };
     }
 
     /// Run a function in a new thread.
     pub fn go(self: *RoutineGroup, func: *const fn () void) !void {
-        self.wg.start();
+        _ = @atomicRmw(usize, &self.count.raw, .Add, 1, .monotonic);
         const thread = try std.Thread.spawn(.{}, struct {
-            fn run(f: *const fn () void, w: *std.Thread.WaitGroup) void {
-                defer w.finish();
+            fn run(f: *const fn () void, c: *std.atomic.Value(usize)) void {
+                defer _ = @atomicRmw(usize, &c.raw, .Sub, 1, .monotonic);
                 f();
             }
-        }.run, .{ func, &self.wg });
+        }.run, .{ func, &self.count });
         thread.detach();
     }
 
     /// Run a function with a single argument in a new thread.
     pub fn goWith(self: *RoutineGroup, comptime T: type, func: *const fn (T) void, arg: T) !void {
-        self.wg.start();
+        _ = @atomicRmw(usize, &self.count.raw, .Add, 1, .monotonic);
         const thread = try std.Thread.spawn(.{}, struct {
-            fn run(a: T, f: *const fn (T) void, w: *std.Thread.WaitGroup) void {
-                defer w.finish();
+            fn run(a: T, f: *const fn (T) void, c: *std.atomic.Value(usize)) void {
+                defer _ = @atomicRmw(usize, &c.raw, .Sub, 1, .monotonic);
                 f(a);
             }
-        }.run, .{ arg, func, &self.wg });
+        }.run, .{ arg, func, &self.count });
         thread.detach();
     }
 
     /// Wait for all routines to finish.
     pub fn wait(self: *RoutineGroup) void {
-        self.wg.wait();
+        while (self.count.load(.monotonic) > 0) {
+            std.Thread.yield() catch {};
+        }
     }
 };
 
@@ -65,23 +68,29 @@ pub fn goSafeWith(comptime T: type, func: *const fn (T) void, arg: T) !void {
 }
 
 /// A task runner that limits concurrency with a semaphore.
+/// NOTE: Simplified for Zig 0.16 - semaphore requires Io context
 pub const TaskRunner = struct {
-    semaphore: std.Thread.Semaphore,
+    max_concurrent: usize,
+    active: std.atomic.Value(usize),
 
     pub fn init(max_concurrent: usize) TaskRunner {
         return .{
-            .semaphore = std.Thread.Semaphore{ .permits = @intCast(max_concurrent) },
+            .max_concurrent = max_concurrent,
+            .active = std.atomic.Value(usize).init(0),
         };
     }
 
     pub fn run(self: *TaskRunner, func: *const fn () void) !void {
-        self.semaphore.wait();
+        while (self.active.load(.monotonic) >= self.max_concurrent) {
+            std.Thread.yield() catch {};
+        }
+        _ = @atomicRmw(usize, &self.active.raw, .Add, 1, .monotonic);
         const thread = try std.Thread.spawn(.{}, struct {
-            fn run(f: *const fn () void, s: *std.Thread.Semaphore) void {
-                defer s.post();
+            fn run(f: *const fn () void, a: *std.atomic.Value(usize)) void {
+                defer _ = @atomicRmw(usize, &a.raw, .Sub, 1, .monotonic);
                 f();
             }
-        }.run, .{ func, &self.semaphore });
+        }.run, .{ func, &self.active });
         thread.detach();
     }
 };
@@ -122,6 +131,6 @@ test "task runner" {
     }.f);
 
     // Give thread time to start
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(usize, 1), Ctx.count.load(.monotonic));
 }

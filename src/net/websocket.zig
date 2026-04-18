@@ -5,6 +5,7 @@
 const std = @import("std");
 const errors = @import("../core/errors.zig");
 const api = @import("api.zig");
+const io_instance = @import("../io_instance.zig");
 
 /// WebSocket opcode
 pub const Opcode = enum(u4) {
@@ -30,11 +31,11 @@ pub const Frame = struct {
 
 /// WebSocket connection
 pub const Conn = struct {
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     allocator: std.mem.Allocator,
     closed: std.atomic.Value(bool),
 
-    pub fn init(stream: std.net.Stream, allocator: std.mem.Allocator) Conn {
+    pub fn init(stream: std.Io.net.Stream, allocator: std.mem.Allocator) Conn {
         return .{
             .stream = stream,
             .allocator = allocator,
@@ -45,7 +46,9 @@ pub const Conn = struct {
     /// Read a WebSocket frame
     pub fn readFrame(self: *Conn) !Frame {
         var header: [2]u8 = undefined;
-        _ = try self.stream.readAtLeast(&header, header.len);
+        var io_buf: [4096]u8 = undefined;
+        var stream_r = self.stream.reader(io_instance.io, &io_buf);
+        try stream_r.interface.readSliceAll(&header);
 
         const fin = (header[0] & 0x80) != 0;
         const opcode: Opcode = @enumFromInt(header[0] & 0x0F);
@@ -54,22 +57,22 @@ pub const Conn = struct {
 
         if (payload_len == 126) {
             var len_bytes: [2]u8 = undefined;
-            _ = try self.stream.readAtLeast(&len_bytes, len_bytes.len);
+            try stream_r.interface.readSliceAll(&len_bytes);
             payload_len = @as(u64, std.mem.readInt(u16, &len_bytes, .big));
         } else if (payload_len == 127) {
             var len_bytes: [8]u8 = undefined;
-            _ = try self.stream.readAtLeast(&len_bytes, len_bytes.len);
+            try stream_r.interface.readSliceAll(&len_bytes);
             payload_len = std.mem.readInt(u64, &len_bytes, .big);
         }
 
         var mask_key: [4]u8 = undefined;
         if (masked) {
-            _ = try self.stream.readAtLeast(&mask_key, mask_key.len);
+            try stream_r.interface.readSliceAll(&mask_key);
         }
 
         const payload = try self.allocator.alloc(u8, payload_len);
         errdefer self.allocator.free(payload);
-        _ = try self.stream.readAtLeast(payload, payload.len);
+        try stream_r.interface.readSliceAll(payload);
 
         if (masked) {
             for (payload, 0..) |*byte, i| {
@@ -111,7 +114,7 @@ pub const Conn = struct {
     fn writeFrame(self: *Conn, opcode: Opcode, payload: []const u8) !void {
         if (self.closed.load(.monotonic)) return error.NetworkError;
 
-        var buf: std.ArrayList(u8) = .{};
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
 
         const first_byte: u8 = 0x80 | @as(u8, @intFromEnum(opcode));
@@ -132,7 +135,10 @@ pub const Conn = struct {
         }
 
         try buf.appendSlice(self.allocator, payload);
-        _ = try self.stream.write(buf.items);
+
+        var io_buf: [4096]u8 = undefined;
+        var stream_w = self.stream.writer(io_instance.io, &io_buf);
+        try stream_w.interface.writeAll(buf.items);
     }
 
     /// Close the connection
@@ -140,7 +146,7 @@ pub const Conn = struct {
         if (!self.closed.load(.monotonic)) {
             self.writeClose(1000, "normal") catch {};
             self.closed.store(true, .monotonic);
-            self.stream.close();
+            self.stream.close(io_instance.io);
         }
     }
 };
@@ -160,7 +166,7 @@ pub fn computeAcceptKey(allocator: std.mem.Allocator, key: []const u8) ![]const 
 }
 
 /// Upgrade an HTTP connection to WebSocket
-pub fn upgrade(ctx: *api.Context, conn: std.net.Stream, allocator: std.mem.Allocator) !Conn {
+pub fn upgrade(ctx: *api.Context, conn: std.Io.net.Stream, allocator: std.mem.Allocator) !Conn {
     const key = ctx.header("Sec-WebSocket-Key") orelse return error.ValidationError;
     const accept_key = try computeAcceptKey(allocator, key);
     defer allocator.free(accept_key);
@@ -176,7 +182,9 @@ pub fn upgrade(ctx: *api.Context, conn: std.net.Stream, allocator: std.mem.Alloc
     );
     defer allocator.free(response);
 
-    _ = try conn.write(response);
+    var io_buf: [4096]u8 = undefined;
+    var w = conn.writer(io_instance.io, &io_buf);
+    try w.interface.writeAll(response);
     return Conn.init(conn, allocator);
 }
 
@@ -185,14 +193,14 @@ pub const Room = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
     conns: std.AutoHashMap(*Conn, void),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) !Room {
         return .{
             .allocator = allocator,
             .name = try allocator.dupe(u8, name),
             .conns = std.AutoHashMap(*Conn, void).init(allocator),
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
         };
     }
 
@@ -203,22 +211,22 @@ pub const Room = struct {
 
     /// Add a connection to the room
     pub fn join(self: *Room, conn: *Conn) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         try self.conns.put(conn, {});
     }
 
     /// Remove a connection from the room
     pub fn leave(self: *Room, conn: *Conn) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         _ = self.conns.remove(conn);
     }
 
     /// Broadcast a text message to all connections in the room
     pub fn broadcast(self: *Room, data: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         var iter = self.conns.keyIterator();
         while (iter.next()) |conn_ptr| {
             const conn = conn_ptr.*;
@@ -230,8 +238,8 @@ pub const Room = struct {
 
     /// Number of connections in the room
     pub fn size(self: *Room) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         return self.conns.count();
     }
 };
@@ -240,18 +248,18 @@ pub const Room = struct {
 pub const Hub = struct {
     allocator: std.mem.Allocator,
     rooms: std.StringHashMap(*Room),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) Hub {
         return .{
             .allocator = allocator,
             .rooms = std.StringHashMap(*Room).init(allocator),
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
         };
     }
 
     pub fn deinit(self: *Hub) void {
-        self.mutex.lock();
+        self.mutex.lock(io_instance.io) catch {};
         var iter = self.rooms.valueIterator();
         while (iter.next()) |room_ptr| {
             room_ptr.*.deinit();
@@ -262,8 +270,8 @@ pub const Hub = struct {
 
     /// Get an existing room or create a new one
     pub fn room(self: *Hub, name: []const u8) !*Room {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
 
         if (self.rooms.get(name)) |r| return r;
 
@@ -275,8 +283,8 @@ pub const Hub = struct {
 
     /// Remove a room and all its connections
     pub fn removeRoom(self: *Hub, name: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         if (self.rooms.fetchRemove(name)) |kv| {
             kv.value.deinit();
             self.allocator.destroy(kv.value);
@@ -285,8 +293,8 @@ pub const Hub = struct {
 
     /// Broadcast a text message to all rooms
     pub fn broadcastAll(self: *Hub, data: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(io_instance.io) catch {};
+        defer self.mutex.unlock(io_instance.io);
         var iter = self.rooms.valueIterator();
         while (iter.next()) |room_ptr| {
             room_ptr.*.broadcast(data);

@@ -345,9 +345,8 @@ test "prometheus export" {
     counter.inc();
 
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try registry.exportPrometheus(fbs.writer());
-
-    const output = fbs.getWritten();
+    var fbs = std.Io.Writer.fixed(&buf);
+    try registry.exportPrometheus(&fbs);
+    const output = fbs.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "test_counter") != null);
 }

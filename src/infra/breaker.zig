@@ -3,6 +3,7 @@
 //! Implements the circuit breaker pattern aligned with go-zero's breaker.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("../core/errors.zig");
 
 /// Circuit breaker state
@@ -53,7 +54,7 @@ pub const CircuitBreaker = struct {
         switch (self.state) {
             .closed => return true,
             .open => {
-                const now = std.time.timestamp();
+                const now = io_instance.seconds();
                 if (now - self.opened_at >= @as(i64, @intCast(self.config.sleep_duration_sec))) {
                     self.state = .half_open;
                     self.total_requests = 0;
@@ -83,7 +84,7 @@ pub const CircuitBreaker = struct {
     pub fn recordFailure(self: *CircuitBreaker) void {
         self.total_requests += 1;
         self.failed_requests += 1;
-        self.last_failure_time = std.time.timestamp();
+        self.last_failure_time = io_instance.seconds();
 
         if (self.state == .closed) {
             if (self.shouldTrip()) {
@@ -109,7 +110,7 @@ pub const CircuitBreaker = struct {
     /// Open the circuit
     fn open(self: *CircuitBreaker) void {
         self.state = .open;
-        self.opened_at = std.time.timestamp();
+        self.opened_at = io_instance.seconds();
     }
 
     /// Close the circuit (reset)

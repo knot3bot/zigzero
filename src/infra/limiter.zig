@@ -3,7 +3,21 @@
 //! Provides token bucket and sliding window rate limiting aligned with go-zero's limit.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("../core/errors.zig");
+
+// Helper functions for getting timestamps in Zig 0.16
+fn nanoTimestamp() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+    return ts.sec * 1_000_000_000 + ts.nsec;
+}
+
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+    return ts.sec * 1000 + @divFloor(ts.nsec, 1000000);
+}
 
 /// Rate limiter type
 pub const Type = enum {
@@ -35,7 +49,7 @@ pub const TokenBucket = struct {
             .rate = rate,
             .burst = burst,
             .tokens = @as(f64, @floatFromInt(burst)),
-            .last_update = std.time.nanoTimestamp(),
+            .last_update = nanoTimestamp(),
         };
     }
 
@@ -57,7 +71,7 @@ pub const TokenBucket = struct {
 
     /// Replenish tokens based on elapsed time
     fn replenish(self: *TokenBucket) void {
-        const now = std.time.nanoTimestamp();
+        const now = nanoTimestamp();
         const elapsed = @as(f64, @floatFromInt(now - self.last_update)) / 1_000_000_000.0;
 
         self.tokens = @min(@as(f64, @floatFromInt(self.burst)), self.tokens + elapsed * self.rate);
@@ -78,17 +92,17 @@ pub const SlidingWindow = struct {
             .allocator = allocator,
             .rate = rate,
             .window_size_ns = @as(i64, @intCast(window_sec)) * 1_000_000_000,
-            .requests = std.ArrayList(i64){},
+            .requests = std.ArrayList(i64).init(allocator),
         };
     }
 
     pub fn deinit(self: *SlidingWindow) void {
-        self.requests.deinit(self.allocator);
+        self.requests.deinit();
     }
 
     /// Try to allow a request
     pub fn allow(self: *SlidingWindow) bool {
-        const now = std.time.nanoTimestamp();
+        const now = nanoTimestamp();
         const window_start = now - self.window_size_ns;
 
         // Remove expired requests
@@ -104,7 +118,7 @@ pub const SlidingWindow = struct {
         // Check if under limit
         const count = @as(u32, @intCast(self.requests.items.len));
         if (count < @as(u32, @intFromFloat(self.rate))) {
-            self.requests.append(self.allocator, now) catch return false;
+            self.requests.append(now) catch return false;
             return true;
         }
 
@@ -118,7 +132,7 @@ pub const IpLimiter = struct {
     rate: f64,
     burst: u32,
     buckets: std.StringHashMap(TokenBucket),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
     last_cleanup: i64,
     cleanup_interval_ms: i64,
 
@@ -128,8 +142,8 @@ pub const IpLimiter = struct {
             .rate = rate,
             .burst = burst,
             .buckets = std.StringHashMap(TokenBucket).init(allocator),
-            .mutex = .{},
-            .last_cleanup = std.time.milliTimestamp(),
+            .mutex = std.Io.Mutex.init,
+            .last_cleanup = milliTimestamp(),
             .cleanup_interval_ms = 60000, // cleanup every 60s
         };
     }
@@ -144,8 +158,8 @@ pub const IpLimiter = struct {
 
     /// Check if request from ip is allowed
     pub fn allow(self: *IpLimiter, ip: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         const gop = self.buckets.getOrPut(ip) catch return false;
         if (!gop.found_existing) {
@@ -156,7 +170,7 @@ pub const IpLimiter = struct {
         const result = gop.value_ptr.allow();
 
         // Periodic cleanup of stale buckets
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
         if (now - self.last_cleanup > self.cleanup_interval_ms) {
             self.last_cleanup = now;
             self.cleanupStaleBuckets();
@@ -166,9 +180,9 @@ pub const IpLimiter = struct {
     }
 
     fn cleanupStaleBuckets(self: *IpLimiter) void {
-        const now = std.time.nanoTimestamp();
+        const now = nanoTimestamp();
         var iter = self.buckets.iterator();
-        var to_remove: std.ArrayList([]const u8) = .{};
+        var to_remove: std.ArrayList([]const u8) = .empty;
         defer {
             for (to_remove.items) |k| self.allocator.free(k);
             to_remove.deinit(self.allocator);

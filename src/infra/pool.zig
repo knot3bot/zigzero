@@ -3,6 +3,7 @@
 //! Provides a reusable connection pool pattern aligned with go-zero.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("../core/errors.zig");
 
 /// Connection factory interface
@@ -30,7 +31,7 @@ pub fn Pool(comptime T: type) type {
         max_active: u32,
         active_count: std.atomic.Value(u32),
         idle_conns: std.ArrayList(Node),
-        mutex: std.Thread.Mutex,
+        mutex: std.Io.Mutex,
         cond: std.Thread.Condition,
         max_wait_ms: u32 = 5000,
         closed: std.atomic.Value(bool),
@@ -51,7 +52,7 @@ pub fn Pool(comptime T: type) type {
                 .max_active = config.max_active,
                 .active_count = std.atomic.Value(u32).init(0),
                 .idle_conns = .{},
-                .mutex = .{},
+                .mutex = std.Io.Mutex.init,
                 .cond = .{},
                 .max_wait_ms = config.max_wait_ms,
                 .closed = std.atomic.Value(bool).init(false),
@@ -63,7 +64,7 @@ pub fn Pool(comptime T: type) type {
                 const conn = createFn() catch continue;
                 try pool.idle_conns.append(allocator, .{
                     .conn = conn,
-                    .last_used = std.time.milliTimestamp(),
+                    .last_used = io_instance.millis(),
                 });
                 _ = pool.active_count.fetchAdd(1, .monotonic);
             }
@@ -75,8 +76,8 @@ pub fn Pool(comptime T: type) type {
             self.closed.store(true, .monotonic);
             self.cond.broadcast();
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io_instance.io);
+            defer self.mutex.unlock(io_instance.io);
 
             for (self.idle_conns.items) |node| {
                 self.destroyFn(node.conn);
@@ -88,14 +89,14 @@ pub fn Pool(comptime T: type) type {
         pub fn acquire(self: *Self) !*T {
             if (self.closed.load(.monotonic)) return error.ServerError;
 
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_instance.io);
 
             // Try to get an idle connection
             while (self.idle_conns.items.len > 0) {
                 const node = self.idle_conns.pop();
                 if (node) |n| {
                     if (self.validateFn(n.conn)) {
-                        self.mutex.unlock();
+                        self.mutex.unlock(io_instance.io);
                         return n.conn;
                     }
                     self.destroyFn(n.conn);
@@ -106,25 +107,25 @@ pub fn Pool(comptime T: type) type {
             // Check if we can create a new connection
             const current_active = self.active_count.load(.monotonic);
             if (current_active < self.max_active) {
-                self.mutex.unlock();
+                self.mutex.unlock(io_instance.io);
                 const conn = try self.createFn();
                 _ = self.active_count.fetchAdd(1, .monotonic);
                 return conn;
             }
 
             // Wait for a connection to be released
-            const wait_until = std.time.milliTimestamp() + @as(i64, @intCast(self.max_wait_ms));
-            while (self.idle_conns.items.len == 0 and std.time.milliTimestamp() < wait_until) {
-                self.cond.timedWait(&self.mutex, @intCast(wait_until - std.time.milliTimestamp())) catch break;
+            const wait_until = io_instance.millis() + @as(i64, @intCast(self.max_wait_ms));
+            while (self.idle_conns.items.len == 0 and io_instance.millis() < wait_until) {
+                self.cond.timedWait(&self.mutex, @intCast(wait_until - io_instance.millis())) catch break;
             }
 
             if (self.idle_conns.items.len > 0) {
                 const node = self.idle_conns.pop();
-                self.mutex.unlock();
+                self.mutex.unlock(io_instance.io);
                 if (node) |n| return n.conn;
             }
 
-            self.mutex.unlock();
+            self.mutex.unlock(io_instance.io);
             return error.Timeout;
         }
 
@@ -136,17 +137,17 @@ pub fn Pool(comptime T: type) type {
                 return;
             }
 
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_instance.io);
             self.idle_conns.append(self.allocator, .{
                 .conn = conn,
-                .last_used = std.time.milliTimestamp(),
+                .last_used = io_instance.millis(),
             }) catch {
-                self.mutex.unlock();
+                self.mutex.unlock(io_instance.io);
                 self.destroyFn(conn);
                 _ = self.active_count.fetchSub(1, .monotonic);
                 return;
             };
-            self.mutex.unlock();
+            self.mutex.unlock(io_instance.io);
             self.cond.signal();
         }
 
@@ -157,9 +158,9 @@ pub fn Pool(comptime T: type) type {
 
         /// Current idle connection count
         pub fn idle(self: *Self) usize {
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_instance.io);
             const count = self.idle_conns.items.len;
-            self.mutex.unlock();
+            self.mutex.unlock(io_instance.io);
             return count;
         }
     };

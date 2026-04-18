@@ -29,14 +29,14 @@ pub const Server = struct {
                 const file_path = try std.fmt.bufPrint(&path_buf, "{s}{s}", .{ s.root_dir, ctx.raw_path });
 
                 // Security: prevent directory traversal
-                const resolved = std.fs.cwd().realpath(file_path, &path_buf) catch {
+                const resolved = std.Io.Dir.cwd().realpath(file_path, &path_buf) catch {
                     try ctx.sendError(404, "not found");
                     return;
                 };
 
                 // Ensure the resolved path is within root_dir
                 var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const root_real = std.fs.cwd().realpath(s.root_dir, &root_buf) catch {
+                const root_real = std.Io.Dir.cwd().realpath(s.root_dir, &root_buf) catch {
                     try ctx.sendError(500, "server error");
                     return;
                 };
@@ -47,7 +47,7 @@ pub const Server = struct {
                 }
 
                 // Try to read file
-                const file = std.fs.cwd().openFile(resolved, .{}) catch {
+                const file = std.Io.Dir.cwd().openFile(resolved, .{}) catch {
                     try ctx.sendError(404, "not found");
                     return;
                 };

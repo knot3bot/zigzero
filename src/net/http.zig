@@ -6,6 +6,7 @@ const std = @import("std");
 const errors = @import("../core/errors.zig");
 const trace = @import("../infra/trace.zig");
 const breaker = @import("../infra/breaker.zig");
+const io_instance = @import("../io_instance.zig");
 
 pub const Method = enum {
     GET,
@@ -138,56 +139,60 @@ pub const Client = struct {
         }
 
         // Build HTTP request
-        var req_builder: std.ArrayList(u8) = .{};
-        defer req_builder.deinit(self.allocator);
+        var req_builder = std.Io.Writer.Allocating.init(self.allocator);
+        defer req_builder.deinit();
+        const req_w = &req_builder.writer;
 
         if (body) |b| {
-            try req_builder.writer(self.allocator).print("{s} {s} HTTP/1.1\r\n", .{ method.toString(), path });
-            try req_builder.writer(self.allocator).print("Host: {s}\r\n", .{host});
-            try req_builder.writer(self.allocator).print("Content-Length: {d}\r\n", .{b.len});
-            try req_builder.writer(self.allocator).writeAll("Content-Type: application/json\r\n");
+            try req_w.print("{s} {s} HTTP/1.1\r\n", .{ method.toString(), path });
+            try req_w.print("Host: {s}\r\n", .{host});
+            try req_w.print("Content-Length: {d}\r\n", .{b.len});
+            try req_w.writeAll("Content-Type: application/json\r\n");
         } else {
-            try req_builder.writer(self.allocator).print("{s} {s} HTTP/1.1\r\n", .{ method.toString(), path });
-            try req_builder.writer(self.allocator).print("Host: {s}\r\n", .{host});
+            try req_w.print("{s} {s} HTTP/1.1\r\n", .{ method.toString(), path });
+            try req_w.print("Host: {s}\r\n", .{host});
         }
 
         // Add trace context if present
         if (self.trace_context) |ctx| {
             var tp_buf: [55]u8 = undefined;
             const tp = try ctx.formatTraceparent(&tp_buf);
-            try req_builder.writer(self.allocator).print("traceparent: {s}\r\n", .{tp});
+            try req_w.print("traceparent: {s}\r\n", .{tp});
         }
 
         // Add custom headers
         if (custom_headers) |hdrs| {
             var iter = hdrs.iterator();
             while (iter.next()) |entry| {
-                try req_builder.writer(self.allocator).print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                try req_w.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
             }
         }
 
-        try req_builder.writer(self.allocator).writeAll("Connection: close\r\n\r\n");
+        try req_w.writeAll("Connection: close\r\n\r\n");
 
         if (body) |b| {
-            try req_builder.appendSlice(self.allocator, b);
+            try req_w.writeAll(b);
         }
 
-        // Connect and send
-        const address = std.net.Address.parseIp4(host, port) catch return error.NetworkError;
-        const stream = std.net.tcpConnectToAddress(address) catch return error.NetworkError;
-        defer stream.close();
+        const req_bytes = req_builder.written();
 
-        _ = stream.write(req_builder.items) catch return error.NetworkError;
+        // Connect and send
+        const address = std.Io.net.IpAddress.parseIp4(host, port) catch return error.NetworkError;
+        var stream = address.connect(io_instance.io, .{ .mode = .stream }) catch return error.NetworkError;
+        defer stream.close(io_instance.io);
+
+        var io_buf: [4096]u8 = undefined;
+        var stream_w = stream.writer(io_instance.io, &io_buf);
+        stream_w.interface.writeAll(req_bytes) catch return error.NetworkError;
 
         // Read response
-        var buf: [8192]u8 = undefined;
-        var response_data: std.ArrayList(u8) = .{};
+        var response_data: std.ArrayList(u8) = .empty;
         defer response_data.deinit(self.allocator);
-
+        var stream_r = stream.reader(io_instance.io, &io_buf);
         while (true) {
-            const n = stream.read(&buf) catch break;
+            const n = stream_r.interface.readSliceShort(&io_buf) catch break;
             if (n == 0) break;
-            try response_data.appendSlice(self.allocator, buf[0..n]);
+            try response_data.appendSlice(self.allocator, io_buf[0..n]);
         }
 
         if (response_data.items.len == 0) return error.NetworkError;

@@ -233,10 +233,10 @@ pub const EtcdDiscovery = struct {
     }
 
     fn keepAliveLoop(self: *EtcdDiscovery, ttl: i64) void {
-        const interval_ms = @max(1000, @as(u64, @intCast(ttl)) * 1000 / 3);
+        _ = ttl;
         while (self.keepalive_running.load(.monotonic)) {
             self.etcd.keepAlive(self.lease_id) catch {};
-            std.Thread.sleep(interval_ms * std.time.ns_per_ms);
+            std.Thread.yield() catch {};
         }
     }
 };

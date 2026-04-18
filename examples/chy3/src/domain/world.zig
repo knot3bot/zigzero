@@ -8,8 +8,9 @@
 //! - GET  /api/v1/worlds/stats          — World-wide statistics
 
 const std = @import("std");
-const api = zigzero.api;
 const zigzero = @import("zigzero");
+const io_instance = zigzero.io_instance;
+const api = zigzero.api;
 const context = @import("../context.zig");
 const types = @import("../types.zig");
 
@@ -84,7 +85,8 @@ pub fn handleTriggerEvent(ctx: *api.Context) !void {
     const event_id = try std.fmt.allocPrint(
         ctx.allocator,
         "evt_{d}",
-        .{std.time.timestamp()},
+        .{io_instance.seconds()},
+
     );
     defer ctx.allocator.free(event_id);
 

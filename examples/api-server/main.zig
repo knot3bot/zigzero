@@ -1,5 +1,6 @@
 const std = @import("std");
 const zigzero = @import("zigzero");
+const io_instance = zigzero.io_instance;
 const api = zigzero.api;
 const log = zigzero.log;
 const health = zigzero.health;
@@ -12,10 +13,10 @@ const limiter = zigzero.limiter;
 const breaker = zigzero.breaker;
 const http = zigzero.http;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    io_instance.io = init.io;
+    io_instance.allocator = allocator;
 
     // Initialize logger
     log.initFromConfig(.{
@@ -124,7 +125,9 @@ pub fn main() !void {
         .path = "/slow",
         .handler = struct {
             fn handle(ctx: *api.Context) !void {
-                std.Thread.sleep(200 * std.time.ns_per_ms);
+                // Simulate slow processing
+                var i: u32 = 0;
+                while (i < 10000000) : (i += 1) {}
                 try ctx.jsonStruct(200, .{ .status = "completed" });
             }
         }.handle,
@@ -152,7 +155,7 @@ pub fn main() !void {
                 const token = try middleware.generateToken(ctx.allocator, .{
                     .sub = "user123",
                     .username = "alice",
-                    .exp = std.time.timestamp() + 3600,
+                    .exp = io_instance.seconds() + 3600,
                 }, "my-secret-key");
                 defer ctx.allocator.free(token);
                 try ctx.jsonStruct(200, .{ .token = token });
@@ -258,7 +261,7 @@ pub fn main() !void {
                 const service_name = ctx.param("service") orelse return error.InvalidParameter;
                 const disc = @as(*discovery.StaticDiscovery, @ptrCast(@alignCast(ctx.user_data.?)));
                 if (disc.getNodes(service_name)) |nodes| {
-                    var endpoints: std.ArrayList([]const u8) = .{};
+                    var endpoints: std.ArrayList([]const u8) = .empty;
                     defer endpoints.deinit(ctx.allocator);
                     for (nodes) |node| {
                         try endpoints.append(ctx.allocator, node.address);

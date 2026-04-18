@@ -3,6 +3,7 @@
 //! Aligned with go-zero's core/fx package.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 const errors = @import("errors.zig");
 
 /// Parallel executes a function for each item in a slice concurrently.
@@ -12,25 +13,29 @@ pub fn Parallel(comptime T: type, _allocator: std.mem.Allocator, items: []const 
     const workers = if (max_workers == 0) items.len else @min(max_workers, items.len);
     if (workers == 0) return;
 
-    var wg = std.Thread.WaitGroup{};
-    var semaphore = std.Thread.Semaphore{ .permits = @intCast(workers) };
+    var active = std.atomic.Value(usize).init(0);
+    var completed = std.atomic.Value(usize).init(0);
 
     for (items) |item| {
-        semaphore.wait();
-        wg.start();
+        while (active.load(.monotonic) >= workers) {
+            std.Thread.yield() catch {};
+        }
+        _ = @atomicRmw(usize, &active.raw, .Add, 1, .monotonic);
         const thread = try std.Thread.spawn(.{}, struct {
-            fn run(i: T, f: *const fn (T) void, s: *std.Thread.Semaphore, w: *std.Thread.WaitGroup) void {
+            fn run(i: T, f: *const fn (T) void, a: *std.atomic.Value(usize), c: *std.atomic.Value(usize)) void {
                 defer {
-                    s.post();
-                    w.finish();
+                    _ = @atomicRmw(usize, &a.raw, .Sub, 1, .monotonic);
+                    _ = @atomicRmw(usize, &c.raw, .Add, 1, .monotonic);
                 }
                 f(i);
             }
-        }.run, .{ item, func, &semaphore, &wg });
+        }.run, .{ item, func, &active, &completed });
         thread.detach();
     }
 
-    wg.wait();
+    while (completed.load(.monotonic) < items.len) {
+        std.Thread.yield() catch {};
+    }
 }
 
 /// Map applies a transform to each element concurrently.
@@ -41,32 +46,33 @@ pub fn Map(comptime In: type, comptime Out: type, allocator: std.mem.Allocator, 
     const workers = if (max_workers == 0) items.len else @min(max_workers, items.len);
     if (workers == 0) return results;
 
-    var wg = std.Thread.WaitGroup{};
-    var mutex = std.Thread.Mutex{};
-    var semaphore = std.Thread.Semaphore{ .permits = @intCast(workers) };
-    var err: ?anyerror = null;
+    var active = std.atomic.Value(usize).init(0);
+    var completed = std.atomic.Value(usize).init(0);
+    var mutex = std.Io.Mutex.init;
 
     for (items, 0..) |item, idx| {
-        semaphore.wait();
-        wg.start();
+        while (active.load(.monotonic) >= workers) {
+            std.Thread.yield() catch {};
+        }
+        _ = @atomicRmw(usize, &active.raw, .Add, 1, .monotonic);
         const thread = try std.Thread.spawn(.{}, struct {
-            fn run(i: In, index: usize, f: *const fn (In) Out, res: []Out, s: *std.Thread.Semaphore, w: *std.Thread.WaitGroup, m: *std.Thread.Mutex, e: *?anyerror) void {
+            fn run(i: In, index: usize, f: *const fn (In) Out, res: []Out, a: *std.atomic.Value(usize), c: *std.atomic.Value(usize), m: *std.Io.Mutex) void {
                 defer {
-                    s.post();
-                    w.finish();
+                    _ = @atomicRmw(usize, &a.raw, .Sub, 1, .monotonic);
+                    _ = @atomicRmw(usize, &c.raw, .Add, 1, .monotonic);
                 }
                 const out = f(i);
-                m.lock();
+                m.lock(io_instance.io) catch {};
                 res[index] = out;
-                m.unlock();
-                _ = e;
+                m.unlock(io_instance.io);
             }
-        }.run, .{ item, idx, func, results, &semaphore, &wg, &mutex, &err });
+        }.run, .{ item, idx, func, results, &active, &completed, &mutex });
         thread.detach();
     }
 
-    wg.wait();
-    if (err) |e| return e;
+    while (completed.load(.monotonic) < items.len) {
+        std.Thread.yield() catch {};
+    }
     return results;
 }
 
@@ -81,7 +87,7 @@ pub fn Stream(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .allocator = allocator,
-                .items = std.ArrayList(T){},
+                .items = .empty,
             };
         }
 

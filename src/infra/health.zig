@@ -4,6 +4,13 @@
 
 const std = @import("std");
 
+// Helper function for getting millisecond timestamp in Zig 0.16
+fn milliTimestamp() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+    return ts.sec * 1000 + @divFloor(ts.nsec, 1000000);
+}
+
 /// Health status
 pub const Status = enum {
     healthy,
@@ -23,7 +30,7 @@ pub const Result = struct {
             .name = name,
             .status = status,
             .message = null,
-            .timestamp = std.time.milliTimestamp(),
+            .timestamp = milliTimestamp(),
         };
     }
 
@@ -73,7 +80,7 @@ pub const Registry = struct {
                     .name = entry.key_ptr.*,
                     .status = .unhealthy,
                     .message = @errorName(err),
-                    .timestamp = std.time.milliTimestamp(),
+                    .timestamp = milliTimestamp(),
                 };
             };
             try results.put(entry.key_ptr.*, result);

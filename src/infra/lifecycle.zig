@@ -3,13 +3,14 @@
 //! Provides graceful shutdown, signal handling, and application lifecycle hooks.
 
 const std = @import("std");
+const io_instance = @import("../io_instance.zig");
 
 /// Lifecycle manager for graceful application shutdown
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     running: std.atomic.Value(bool),
     shutdown_hooks: std.ArrayList(ShutdownHook),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     const ShutdownHook = struct {
         name: []const u8,
@@ -21,21 +22,21 @@ pub const Manager = struct {
         return .{
             .allocator = allocator,
             .running = std.atomic.Value(bool).init(true),
-            .shutdown_hooks = .{},
-            .mutex = .{},
+            .shutdown_hooks = .empty,
+            .mutex = std.Io.Mutex.init,
         };
     }
 
     pub fn deinit(self: *Manager) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
         self.shutdown_hooks.deinit(self.allocator);
     }
 
     /// Register a shutdown hook
     pub fn onShutdown(self: *Manager, name: []const u8, callback: *const fn (*anyopaque) void, context: *anyopaque) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
         try self.shutdown_hooks.append(self.allocator, .{
             .name = name,
             .callback = callback,
@@ -48,7 +49,7 @@ pub const Manager = struct {
         // Note: In a real implementation, we'd use std.os.sigaction
         // For cross-platform compatibility, this is a simplified version
         while (self.running.load(.monotonic)) {
-            std.Thread.sleep(100 * std.time.ns_per_ms);
+            std.Thread.yield() catch {};
         }
         self.executeShutdown();
     }
@@ -65,8 +66,8 @@ pub const Manager = struct {
 
     /// Execute all shutdown hooks in LIFO order
     fn executeShutdown(self: *Manager) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_instance.io);
+        defer self.mutex.unlock(io_instance.io);
 
         var i: usize = self.shutdown_hooks.items.len;
         while (i > 0) {
@@ -78,9 +79,9 @@ pub const Manager = struct {
 
     /// Wait for a condition with periodic running checks
     pub fn wait(self: *Manager, interval_ms: u64) void {
-        const end = std.time.milliTimestamp() + @as(i64, @intCast(interval_ms));
-        while (self.running.load(.monotonic) and std.time.milliTimestamp() < end) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+        const end = io_instance.millis() + @as(i64, @intCast(interval_ms));
+        while (self.running.load(.monotonic) and io_instance.millis() < end) {
+            std.Thread.yield() catch {};
         }
     }
 };
