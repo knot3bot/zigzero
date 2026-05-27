@@ -56,7 +56,7 @@ jobs:
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.17.0
 
       - name: Install system dependencies (Ubuntu)
         if: runner.os == 'Linux'

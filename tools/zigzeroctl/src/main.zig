@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         args_list.deinit(allocator);
     }
     while (args_iter.next()) |arg| {
-        try args_list.append(allocator, try allocator.dupeZ(u8, arg));
+        try args_list.append(allocator, try allocator.dupeSentinel(u8, arg, 0));
     }
     const args = args_list.items;
 

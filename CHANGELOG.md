@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-28
+
+### Fixed
+- **Zig 0.17.0 migration**: Updated from Zig 0.16.0 to 0.17.0
+  - Replaced `Allocator.dupeZ` with `Allocator.dupeSentinel` (removed in 0.17)
+  - Replaced `std.fmt.bufPrintZ` with `std.fmt.bufPrintSentinel` (removed in 0.17)
+  - Updated `minimum_zig_version` in `build.zig.zon` to 0.17.0
+  - Updated README badge and requirements to 0.17.0+
+  - Updated CI workflow to Zig 0.17.0
+
 ## [0.2.0] - 2026-05-11
 
 ### Added

@@ -242,7 +242,7 @@ pub const SQLiteConn = struct {
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !SQLiteConn {
         var db: ?*sqlite3_c.sqlite3 = null;
-        const c_path = allocator.dupeZ(u8, path) catch return error.DatabaseError;
+        const c_path = allocator.dupeSentinel(u8, path, 0) catch return error.DatabaseError;
         defer allocator.free(c_path);
         const rc = sqlite3_c.sqlite3_open(c_path.ptr, &db);
         if (rc != sqlite3_c.SQLITE_OK or db == null) {
@@ -424,16 +424,16 @@ pub const PostgresConn = struct {
 
     /// Connect using explicit parameters via dlsym (bypasses Zig C ABI issues)
     pub fn connectParams(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, pass: []const u8, db: []const u8) !PostgresConn {
-        const host_c = try allocator.dupeZ(u8, host);
+        const host_c = try allocator.dupeSentinel(u8, host, 0);
         defer allocator.free(host_c);
         const port_str_buf = try allocator.alloc(u8, 8);
-        const port_str = try std.fmt.bufPrintZ(port_str_buf, "{d}", .{port});
+        const port_str = try std.fmt.bufPrintSentinel(port_str_buf, "{d}", .{port}, 0);
         defer allocator.free(port_str_buf);
-        const user_c = try allocator.dupeZ(u8, user);
+        const user_c = try allocator.dupeSentinel(u8, user, 0);
         defer allocator.free(user_c);
-        const pass_c = try allocator.dupeZ(u8, pass);
+        const pass_c = try allocator.dupeSentinel(u8, pass, 0);
         defer allocator.free(pass_c);
-        const db_c = try allocator.dupeZ(u8, db);
+        const db_c = try allocator.dupeSentinel(u8, db, 0);
         defer allocator.free(db_c);
 
         const empty_opt = "\x00";
@@ -456,7 +456,7 @@ pub const PostgresConn = struct {
 
     /// Null-terminated string connect
     pub fn connect(allocator: std.mem.Allocator, conninfo: []const u8) !PostgresConn {
-        const null_terminated = try allocator.dupeZ(u8, conninfo);
+        const null_terminated = try allocator.dupeSentinel(u8, conninfo, 0);
         defer allocator.free(null_terminated);
         const conn = libpq_c.PQconnectdb(null_terminated);
         if (conn == null) return error.DatabaseError;

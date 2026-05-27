@@ -283,7 +283,7 @@ pub const Loader = struct {
             const env_name = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ prefix, upper_name });
             defer self.allocator.free(env_name);
 
-            const c_env_name = try self.allocator.dupeZ(u8, env_name);
+            const c_env_name = try self.allocator.dupeSentinel(u8, env_name, 0);
             defer self.allocator.free(c_env_name);
             if (std.c.getenv(c_env_name.ptr)) |c_value| {
                 const value = std.mem.span(c_value);
